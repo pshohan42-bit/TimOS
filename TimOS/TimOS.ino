@@ -32,13 +32,14 @@ enum OSState {
   OS_APP_POMODORO,
   OS_APP_ALARM,
   OS_APP_SETTINGS,
-  OS_APP_TETRIS
+  OS_APP_TETRIS,
+  OS_APP_READER
 };
 OSState currentOSState = OS_LAUNCHER;
 
 // App Menu Config
-#define NUM_APPS 4
-const char* appNames[NUM_APPS] = {"Pomodoro", "Alarm", "Settings", "Tetris"};
+#define NUM_APPS 5
+const char* appNames[NUM_APPS] = {"Pomodoro", "Alarm", "Settings", "Tetris", "Reader"};
 int selectedAppIndex = 0;
 
 // Pomodoro Variables
@@ -126,6 +127,17 @@ const uint16_t tetrominoes[7][4] = {
   { 0x0C60, 0x4C80, 0xC600, 0x2640 }  // Z
 };
 
+// Reader Variables
+const char* sampleReaderText = "TimOS is a powerful smart timer operating system built for the ESP32C3-Pro. It features a complete RSVP speed reading engine. This allows you to read text rapidly without moving your eyes! The current focus word is highlighted, while the previous and next context words are faded gracefully. Try adjusting the WPM speed using the rotary dial on the fly. Happy reading!";
+enum ReaderState { READER_BOOK_SELECT, READER_CHAPTER_SELECT, READER_MENU, READER_PLAYING, READER_PAUSED, READER_FINISHED };
+ReaderState currentReaderState = READER_BOOK_SELECT;
+int readerWpm = 250;
+int readerWordIndex = 0;
+int readerTotalWords = 0;
+unsigned long lastReaderWordTime = 0;
+#define MAX_READER_WORDS 100
+String readerWords[MAX_READER_WORDS];
+
 // Battery
 float globalBatVolts = 0.0;
 int globalBatteryPct = 100;
@@ -155,402 +167,15 @@ void drawPomodoroApp();
 void drawAlarmApp();
 void drawSettingsApp();
 void drawTetrisApp();
+void drawReaderApp();
 void handleAlarmApp(int encoderDelta, ButtonEvent btnEvent);
 void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent);
 void handleTetrisApp(int encoderDelta, ButtonEvent btnEvent);
+void handleReaderApp(int encoderDelta, ButtonEvent btnEvent);
 bool checkTetrisCollision(int pType, int pRot, int pX, int pY);
 void lockTetrisPiece();
 void spawnTetrisPiece();
 
-void setup() {
-  Serial.begin(115200);
-
-  preferences.begin("timos", false);
-  systemVolume = preferences.getInt("vol", 2);
-  systemBrightness = preferences.getInt("bright", 2);
-  use12HourFormat = preferences.getBool("12hr", false);
-  alarmEnabled = preferences.getBool("alarmEn", false);
-  alarmHour = preferences.getInt("alarmHr", 6);
-  alarmMinute = preferences.getInt("alarmMin", 0);
-
-  // Initialize RTC time (dummy time for testing Launcher)
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  if (tv.tv_sec < 100000) {
-    tv.tv_sec = 1718000000; // Arbitrary timestamp
-    settimeofday(&tv, NULL);
-  }
-
-  // Configure Pins
-  pinMode(ENCODER_CLK, INPUT_PULLUP);
-  pinMode(ENCODER_DT, INPUT_PULLUP);
-  pinMode(ENCODER_SW, INPUT_PULLUP);
-  pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(LED_PIN, OUTPUT);
-  
-  digitalWrite(LED_PIN, HIGH);
-  lastClkState = digitalRead(ENCODER_CLK);
-
-  // Initialize OLED
-  Wire.begin(5, 6); // SDA = GPIO5, SCL = GPIO6
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    while(true) delay(100);
-  }
-  
-  display.ssd1306_command(0xA0); // Un-mirror
-  setDisplayBrightness(systemBrightness); // Apply initial brightness level
-  display.setTextColor(SSD1306_WHITE);
-  
-  updateBatteryMeasurements();
-  lastActivityTime = millis();
-
-  // Show Boot Splash Screen
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(34, 24);
-  display.print("TimOS");
-  display.display();
-  delay(1000);
-}
-
-void loop() {
-  unsigned long now = millis();
-  bool uiChanged = false;
-
-  // 0. Global Alarm Checker
-  static int lastRungMinute = -1;
-  struct timeval tv_alarm;
-  gettimeofday(&tv_alarm, NULL);
-  struct tm* timeinfo_alarm = localtime(&tv_alarm.tv_sec);
-  
-  if (alarmEnabled && !alarmActive) {
-    if (timeinfo_alarm->tm_hour == alarmHour && timeinfo_alarm->tm_min == alarmMinute && timeinfo_alarm->tm_min != lastRungMinute) {
-      alarmActive = true;
-      lastRungMinute = timeinfo_alarm->tm_min;
-      currentOSState = OS_APP_ALARM;
-      currentAlarmState = ALARM_STATE_RINGING;
-      uiChanged = true;
-    }
-  }
-
-  // Active Alarm ringing sound (2Hz beep)
-  if (alarmActive) {
-    static unsigned long lastAlarmBeep = 0;
-    if (now - lastAlarmBeep >= 500) {
-      lastAlarmBeep = now;
-      if (systemVolume > 0) {
-        tone(BUZZER_PIN, (systemVolume == 1) ? 1000 : 2000, 200);
-      }
-      uiChanged = true; // Keep screen flashing/redrawing
-    }
-  }
-
-  // 1. App Carousel Position (Instant Snap - no-op)
-
-  // 2. RTC Clock Tick (Update launcher every second)
-  static unsigned long lastClockUpdate = 0;
-  if (currentOSState == OS_LAUNCHER && (now - lastClockUpdate >= 1000)) {
-    lastClockUpdate = now;
-    uiChanged = true;
-  }
-
-  // 3. Battery Tick (non-blocking)
-  if (now - lastBatteryCheckTime >= 2000) {
-    lastBatteryCheckTime = now;
-    updateBatteryMeasurements();
-    uiChanged = true;
-  }
-
-  // 3.5. Pomodoro Timer Countdown Tick (1Hz)
-  if (currentOSState == OS_APP_POMODORO && currentPomoState == POMO_STATE_RUNNING) {
-    static unsigned long lastPomoTick = 0;
-    if (now - lastPomoTick >= 1000) {
-      lastPomoTick = now;
-      if (pomoLeftSeconds > 0) {
-        pomoLeftSeconds--;
-        uiChanged = true;
-      }
-      if (pomoLeftSeconds <= 0) {
-        currentPomoState = POMO_STATE_FINISHED;
-        uiChanged = true;
-        playFinishedMelody();
-      }
-    }
-  }
-
-  // 3.6 Tetris Gravity Tick
-  if (currentOSState == OS_APP_TETRIS && currentTetrisState == TETRIS_PLAYING) {
-    if (now - lastTetrisDrop >= tetrisSpeed) {
-      lastTetrisDrop = now;
-      if (!checkTetrisCollision(currentPieceType, currentPieceRot, currentPieceX, currentPieceY + 1)) {
-        currentPieceY++;
-      } else {
-        lockTetrisPiece();
-      }
-      uiChanged = true;
-    }
-  }
-
-  // 4. Read Inputs
-  int encoderDelta = readEncoderDelta();
-  ButtonEvent btnEvent = checkButton();
-  if (encoderDelta != 0 || btnEvent != BUTTON_NONE) {
-    uiChanged = true;
-    lastActivityTime = now;
-  }
-
-  // 4.5 Idle Sleep Timer
-  if (now - lastActivityTime >= 60000) {
-    bool canSleep = true;
-    if (currentOSState == OS_APP_POMODORO && currentPomoState == POMO_STATE_RUNNING) canSleep = false;
-    if (alarmActive) canSleep = false;
-    if (canSleep) goToSleep();
-  }
-
-  // 5. Global Actions
-  if (btnEvent == BUTTON_SLEEP) {
-    goToSleep();
-  } else if (btnEvent == BUTTON_HOME_PRESS) {
-    if (currentOSState == OS_APP_TETRIS) display.setRotation(0);
-    currentOSState = OS_LAUNCHER;
-    playCancelTone();
-  }
-
-  // 6. TimOS State Machine
-  switch (currentOSState) {
-    
-    // --- HOME SCREEN ---
-    case OS_LAUNCHER:
-      if (btnEvent == BUTTON_CLICK) {
-        currentOSState = OS_APP_MENU;
-        playSelectTone();
-      }
-      break;
-
-    // --- APP CAROUSEL ---
-    case OS_APP_MENU:
-      if (encoderDelta != 0) {
-        selectedAppIndex += encoderDelta;
-        if (selectedAppIndex < 0) selectedAppIndex = NUM_APPS - 1;
-        if (selectedAppIndex >= NUM_APPS) selectedAppIndex = 0;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        // Open Selected App
-        if (selectedAppIndex == 0) currentOSState = OS_APP_POMODORO;
-        else if (selectedAppIndex == 1) currentOSState = OS_APP_ALARM;
-        else if (selectedAppIndex == 2) currentOSState = OS_APP_SETTINGS;
-        else if (selectedAppIndex == 3) {
-          currentOSState = OS_APP_TETRIS;
-          display.setRotation(3); // Inverted Portrait mode
-        }
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentOSState = OS_LAUNCHER; // Back to home
-        playCancelTone();
-      }
-      break;
-
-    // --- APPS (TimOS Applications) ---
-    case OS_APP_POMODORO:
-      if (currentPomoState == POMO_STATE_MENU) {
-        if (encoderDelta != 0) {
-          selectedPomoMode += encoderDelta;
-          if (selectedPomoMode < 0) selectedPomoMode = 3;
-          if (selectedPomoMode > 3) selectedPomoMode = 0;
-        }
-        if (btnEvent == BUTTON_CLICK) {
-          if (selectedPomoMode < 3) {
-            // Preset Times
-            if (selectedPomoMode == 0) pomoTotalSeconds = 25 * 60;
-            else if (selectedPomoMode == 1) pomoTotalSeconds = 5 * 60;
-            else if (selectedPomoMode == 2) pomoTotalSeconds = 15 * 60;
-            pomoLeftSeconds = pomoTotalSeconds;
-            currentPomoState = POMO_STATE_RUNNING;
-            playSelectTone();
-          } else {
-            // Custom Time Configuration
-            customMinutes = 25;
-            customSeconds = 0;
-            currentPomoState = POMO_STATE_CUSTOM_MINS;
-            playSelectTone();
-          }
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentOSState = OS_APP_MENU; // Back to app launcher
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_CUSTOM_MINS) {
-        if (encoderDelta != 0) {
-          customMinutes += encoderDelta;
-          if (customMinutes < 1) customMinutes = 99; // Constrain between 1 and 99 mins
-          if (customMinutes > 99) customMinutes = 1;
-        }
-        if (btnEvent == BUTTON_CLICK) {
-          currentPomoState = POMO_STATE_CUSTOM_SECS;
-          playSelectTone();
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentPomoState = POMO_STATE_MENU;
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_CUSTOM_SECS) {
-        if (encoderDelta != 0) {
-          customSeconds += encoderDelta;
-          if (customSeconds < 0) customSeconds = 59;
-          if (customSeconds > 59) customSeconds = 0;
-        }
-        if (btnEvent == BUTTON_CLICK) {
-          pomoTotalSeconds = (customMinutes * 60) + customSeconds;
-          if (pomoTotalSeconds > 0) {
-            pomoLeftSeconds = pomoTotalSeconds;
-            currentPomoState = POMO_STATE_RUNNING;
-            playSelectTone();
-          } else {
-            playCancelTone();
-          }
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentPomoState = POMO_STATE_CUSTOM_MINS;
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_RUNNING) {
-        if (btnEvent == BUTTON_CLICK) {
-          currentPomoState = POMO_STATE_PAUSED;
-          playSelectTone();
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentPomoState = POMO_STATE_MENU;
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_PAUSED) {
-        if (btnEvent == BUTTON_CLICK) {
-          currentPomoState = POMO_STATE_RUNNING;
-          playSelectTone();
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentPomoState = POMO_STATE_MENU;
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_FINISHED) {
-        if (encoderDelta != 0) {
-          pomoFinishedSelect = (pomoFinishedSelect == 0) ? 1 : 0;
-        }
-        if (btnEvent == BUTTON_CLICK) {
-          if (pomoFinishedSelect == 0) { // Restart
-            pomoLeftSeconds = pomoTotalSeconds;
-            currentPomoState = POMO_STATE_RUNNING;
-            playSelectTone();
-          } else { // Exit
-            currentPomoState = POMO_STATE_MENU;
-            playCancelTone();
-          }
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentOSState = OS_APP_MENU;
-          playCancelTone();
-        }
-      }
-      break;
-
-    case OS_APP_ALARM:
-      handleAlarmApp(encoderDelta, btnEvent);
-      break;
-
-    case OS_APP_SETTINGS:
-      handleSettingsApp(encoderDelta, btnEvent);
-      break;
-
-    case OS_APP_TETRIS:
-      handleTetrisApp(encoderDelta, btnEvent);
-      break;
-  }
-
-  // 7. Draw UI Layer
-  if (uiChanged) {
-    display.clearDisplay();
-    drawBatteryStatus();
-    
-    if (currentOSState == OS_LAUNCHER) {
-      drawLauncher();
-    } else if (currentOSState == OS_APP_MENU) {
-      drawAppMenu();
-    } else if (currentOSState == OS_APP_POMODORO) {
-      drawPomodoroApp();
-    } else if (currentOSState == OS_APP_ALARM) {
-      drawAlarmApp();
-    } else if (currentOSState == OS_APP_SETTINGS) {
-      drawSettingsApp();
-    } else if (currentOSState == OS_APP_TETRIS) {
-      drawTetrisApp();
-    }
-    
-    display.display();
-  }
-  
-  // 8. Update LED status (breathing, flashing, solid)
-  updateLED();
-
-  delay(1);
-}
-
-/* ========================================================================== */
-/*                             VISUALS & RENDERING                            */
-/* ========================================================================== */
-
-void drawLauncher() {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  struct tm* timeinfo = localtime(&tv.tv_sec);
-  
-  char digitsStr[10];
-  const char* ampm = "";
-  
-  if (use12HourFormat) {
-    int hr = timeinfo->tm_hour;
-    ampm = (hr >= 12) ? "PM" : "AM";
-    hr = hr % 12;
-    if (hr == 0) hr = 12;
-    sprintf(digitsStr, "%d:%02d", hr, timeinfo->tm_min);
-  } else {
-    strftime(digitsStr, sizeof(digitsStr), "%H:%M", timeinfo);
-  }
-  
-  // Format Date (e.g. "Mon, 15 Jul")
-  char dateStr[20];
-  strftime(dateStr, sizeof(dateStr), "%a, %d %b", timeinfo);
-
-  // Big Clock Digits
-  display.setTextSize(3);
-  int digitsWidth = strlen(digitsStr) * 18; 
-  int startX = 64 - (digitsWidth / 2);
-  
-  // If showing AM/PM, offset slightly left to balance the AM/PM width
-  if (use12HourFormat) {
-    startX = 64 - ((digitsWidth + 14) / 2);
-  }
-  
-  display.setCursor(startX, 16);
-  display.print(digitsStr);
-  
-  // Small AM/PM
-  if (use12HourFormat) {
-    display.setTextSize(1);
-    display.setCursor(startX + digitsWidth + 2, 16);
-    display.print(ampm);
-  }
-  
-  // Small Date
-  display.setTextSize(1);
-  int dateWidth = strlen(dateStr) * 6;
-  display.setCursor(64 - (dateWidth/2), 48);
-  display.print(dateStr);
-}
 
 void drawAppMenu() {
   // Top Title Bar
@@ -813,82 +438,7 @@ void drawPomodoroApp() {
 /*                              ALARM APPLICATION                             */
 /* ========================================================================== */
 
-void handleAlarmApp(int encoderDelta, ButtonEvent btnEvent) {
-  if (alarmActive) {
-    if (btnEvent == BUTTON_CLICK || btnEvent == BUTTON_LONG_PRESS) {
-      alarmActive = false;
-      noTone(BUZZER_PIN);
-      currentOSState = OS_LAUNCHER;
-      playCancelTone();
-    }
-    return;
-  }
 
-  switch (currentAlarmState) {
-    case ALARM_STATE_MENU:
-      if (encoderDelta != 0) {
-        alarmMenuSelect = (alarmMenuSelect == 0) ? 1 : 0;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        if (alarmMenuSelect == 0) { // Toggle status
-          alarmEnabled = !alarmEnabled;
-          preferences.putBool("alarmEn", alarmEnabled);
-          playSelectTone();
-        } else { // Enter Set Time UI
-          tempAlarmHour = alarmHour;
-          tempAlarmMinute = alarmMinute;
-          currentAlarmState = ALARM_STATE_SET_HOUR;
-          playSelectTone();
-        }
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentOSState = OS_APP_MENU;
-        playCancelTone();
-      }
-      break;
-
-    case ALARM_STATE_SET_HOUR:
-      if (encoderDelta != 0) {
-        tempAlarmHour += encoderDelta;
-        if (tempAlarmHour < 0) tempAlarmHour = 23;
-        if (tempAlarmHour > 23) tempAlarmHour = 0;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        currentAlarmState = ALARM_STATE_SET_MINUTE;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentAlarmState = ALARM_STATE_MENU;
-        playCancelTone();
-      }
-      break;
-
-    case ALARM_STATE_SET_MINUTE:
-      if (encoderDelta != 0) {
-        tempAlarmMinute += encoderDelta;
-        if (tempAlarmMinute < 0) tempAlarmMinute = 59;
-        if (tempAlarmMinute > 59) tempAlarmMinute = 0;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        alarmHour = tempAlarmHour;
-        alarmMinute = tempAlarmMinute;
-        preferences.putInt("alarmHr", alarmHour);
-        preferences.putInt("alarmMin", alarmMinute);
-        alarmEnabled = true;
-        preferences.putBool("alarmEn", alarmEnabled);
-        currentAlarmState = ALARM_STATE_MENU;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentAlarmState = ALARM_STATE_SET_HOUR;
-        playCancelTone();
-      }
-      break;
-      
-    case ALARM_STATE_RINGING:
-      break;
-  }
-}
 
 void drawAlarmApp() {
   if (alarmActive) {
@@ -1143,172 +693,7 @@ void setDisplayBrightness(int level) {
   display.ssd1306_command(contrast);
 }
 
-void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent) {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  struct tm* timeinfo = localtime(&tv.tv_sec);
 
-  switch (currentSettingsState) {
-    case SET_STATE_MENU:
-      if (encoderDelta != 0) {
-        settingsMenuSelect += encoderDelta;
-        if (settingsMenuSelect < 0) settingsMenuSelect = 4;
-        if (settingsMenuSelect > 4) settingsMenuSelect = 0;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        playSelectTone();
-        if (settingsMenuSelect == 0) {
-          tempHour = timeinfo->tm_hour;
-          tempMinute = timeinfo->tm_min;
-          currentSettingsState = SET_STATE_TIME_HH;
-        } else if (settingsMenuSelect == 1) {
-          tempDay = timeinfo->tm_mday;
-          tempMonth = timeinfo->tm_mon + 1;
-          tempYear = timeinfo->tm_year + 1900;
-          currentSettingsState = SET_STATE_DATE_DD;
-        } else if (settingsMenuSelect == 2) {
-          use12HourFormat = !use12HourFormat;
-          preferences.putBool("12hr", use12HourFormat);
-        } else if (settingsMenuSelect == 3) {
-          currentSettingsState = SET_STATE_VOLUME;
-        } else if (settingsMenuSelect == 4) {
-          currentSettingsState = SET_STATE_BRIGHTNESS;
-        }
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentOSState = OS_APP_MENU;
-        playCancelTone();
-      }
-      break;
-
-    case SET_STATE_TIME_HH:
-      if (encoderDelta != 0) {
-        tempHour += encoderDelta;
-        if (tempHour < 0) tempHour = 23;
-        if (tempHour > 23) tempHour = 0;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        currentSettingsState = SET_STATE_TIME_MM;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentSettingsState = SET_STATE_MENU;
-        playCancelTone();
-      }
-      break;
-
-    case SET_STATE_TIME_MM:
-      if (encoderDelta != 0) {
-        tempMinute += encoderDelta;
-        if (tempMinute < 0) tempMinute = 59;
-        if (tempMinute > 59) tempMinute = 0;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        timeinfo->tm_hour = tempHour;
-        timeinfo->tm_min = tempMinute;
-        timeinfo->tm_sec = 0;
-        tv.tv_sec = mktime(timeinfo);
-        settimeofday(&tv, NULL);
-        
-        currentSettingsState = SET_STATE_MENU;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentSettingsState = SET_STATE_TIME_HH;
-        playCancelTone();
-      }
-      break;
-
-    case SET_STATE_DATE_DD:
-      if (encoderDelta != 0) {
-        tempDay += encoderDelta;
-        if (tempDay < 1) tempDay = 31;
-        if (tempDay > 31) tempDay = 1;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        currentSettingsState = SET_STATE_DATE_MM;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentSettingsState = SET_STATE_MENU;
-        playCancelTone();
-      }
-      break;
-
-    case SET_STATE_DATE_MM:
-      if (encoderDelta != 0) {
-        tempMonth += encoderDelta;
-        if (tempMonth < 1) tempMonth = 12;
-        if (tempMonth > 12) tempMonth = 1;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        currentSettingsState = SET_STATE_DATE_YY;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentSettingsState = SET_STATE_DATE_DD;
-        playCancelTone();
-      }
-      break;
-
-    case SET_STATE_DATE_YY:
-      if (encoderDelta != 0) {
-        tempYear += encoderDelta;
-        if (tempYear < 2020) tempYear = 2099;
-        if (tempYear > 2099) tempYear = 2020;
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        timeinfo->tm_mday = tempDay;
-        timeinfo->tm_mon = tempMonth - 1;
-        timeinfo->tm_year = tempYear - 1900;
-        tv.tv_sec = mktime(timeinfo);
-        settimeofday(&tv, NULL);
-
-        currentSettingsState = SET_STATE_MENU;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentSettingsState = SET_STATE_DATE_MM;
-        playCancelTone();
-      }
-      break;
-
-    case SET_STATE_VOLUME:
-      if (encoderDelta != 0) {
-        systemVolume += encoderDelta;
-        if (systemVolume < 0) systemVolume = 3;
-        if (systemVolume > 3) systemVolume = 0;
-        preferences.putInt("vol", systemVolume);
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        currentSettingsState = SET_STATE_MENU;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentSettingsState = SET_STATE_MENU;
-        playCancelTone();
-      }
-      break;
-
-    case SET_STATE_BRIGHTNESS:
-      if (encoderDelta != 0) {
-        systemBrightness += encoderDelta;
-        if (systemBrightness < 0) systemBrightness = 2;
-        if (systemBrightness > 2) systemBrightness = 0;
-        setDisplayBrightness(systemBrightness);
-        preferences.putInt("bright", systemBrightness);
-      }
-      if (btnEvent == BUTTON_CLICK) {
-        currentSettingsState = SET_STATE_MENU;
-        playSelectTone();
-      }
-      if (btnEvent == BUTTON_LONG_PRESS) {
-        currentSettingsState = SET_STATE_MENU;
-        playCancelTone();
-      }
-      break;
-  }
-}
 
 void drawSettingsMenu() {
   display.setTextSize(1);
@@ -1533,18 +918,7 @@ void drawSettingsBrightness() {
   display.print(brightStrings[systemBrightness]);
 }
 
-void drawSettingsApp() {
-  switch (currentSettingsState) {
-    case SET_STATE_MENU:       drawSettingsMenu(); break;
-    case SET_STATE_TIME_HH:
-    case SET_STATE_TIME_MM:    drawSettingsTimeSet(); break;
-    case SET_STATE_DATE_DD:
-    case SET_STATE_DATE_MM:
-    case SET_STATE_DATE_YY:    drawSettingsDateSet(); break;
-    case SET_STATE_VOLUME:     drawSettingsVolume(); break;
-    case SET_STATE_BRIGHTNESS: drawSettingsBrightness(); break;
-  }
-}
+
 
 void updateLED() {
   unsigned long now = millis();
@@ -1575,115 +949,13 @@ void updateLED() {
 /*                                TETRIS APP                                  */
 /* ========================================================================== */
 
-bool checkTetrisCollision(int pType, int pRot, int pX, int pY) {
-  uint16_t shape = tetrominoes[pType][pRot];
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 4; c++) {
-      if (shape & (1 << (15 - (r * 4 + c)))) {
-        int boardX = pX + c;
-        int boardY = pY + r;
-        if (boardX < 0 || boardX >= TETRIS_COLS) return true;
-        if (boardY >= TETRIS_ROWS) return true;
-        if (boardY >= 0) {
-          if (tetrisBoard[boardY] & (1 << boardX)) return true;
-        }
-      }
-    }
-  }
-  return false;
-}
 
-void spawnTetrisPiece() {
-  currentPieceType = random(0, 7);
-  currentPieceRot = 0;
-  currentPieceX = 3;
-  currentPieceY = -2;
-  if (checkTetrisCollision(currentPieceType, currentPieceRot, currentPieceX, currentPieceY)) {
-    currentTetrisState = TETRIS_GAMEOVER;
-    playCancelTone();
-  }
-}
 
-void lockTetrisPiece() {
-  uint16_t shape = tetrominoes[currentPieceType][currentPieceRot];
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 4; c++) {
-      if (shape & (1 << (15 - (r * 4 + c)))) {
-        int boardY = currentPieceY + r;
-        int boardX = currentPieceX + c;
-        if (boardY >= 0 && boardY < TETRIS_ROWS) {
-          tetrisBoard[boardY] |= (1 << boardX);
-        }
-      }
-    }
-  }
-  playTick();
 
-  int linesCleared = 0;
-  for (int r = TETRIS_ROWS - 1; r >= 0; r--) {
-    if ((tetrisBoard[r] & 0x3FF) == 0x3FF) {
-      linesCleared++;
-      for (int k = r; k > 0; k--) {
-        tetrisBoard[k] = tetrisBoard[k - 1];
-      }
-      tetrisBoard[0] = 0;
-      r++;
-    }
-  }
 
-  if (linesCleared > 0) {
-    tetrisScore += (linesCleared * linesCleared * 10);
-    tetrisSpeed = max(100, 500 - (tetrisScore));
-    playSelectTone();
-  }
 
-  if (currentTetrisState != TETRIS_GAMEOVER) {
-    spawnTetrisPiece();
-  }
-}
 
-void handleTetrisApp(int encoderDelta, ButtonEvent btnEvent) {
-  if (currentTetrisState == TETRIS_MENU) {
-    if (btnEvent == BUTTON_CLICK) {
-      memset(tetrisBoard, 0, sizeof(tetrisBoard));
-      tetrisScore = 0;
-      tetrisSpeed = 500;
-      currentTetrisState = TETRIS_PLAYING;
-      spawnTetrisPiece();
-      playSelectTone();
-    }
-    if (btnEvent == BUTTON_LONG_PRESS) {
-      currentOSState = OS_APP_MENU;
-      display.setRotation(0);
-      playCancelTone();
-    }
-  }
-  else if (currentTetrisState == TETRIS_GAMEOVER) {
-    if (btnEvent == BUTTON_CLICK || btnEvent == BUTTON_LONG_PRESS) {
-      currentTetrisState = TETRIS_MENU;
-      playCancelTone();
-    }
-  }
-  else if (currentTetrisState == TETRIS_PLAYING) {
-    if (encoderDelta != 0) {
-      int newX = currentPieceX + encoderDelta;
-      if (!checkTetrisCollision(currentPieceType, currentPieceRot, newX, currentPieceY)) {
-        currentPieceX = newX;
-      }
-    }
-    if (btnEvent == BUTTON_CLICK) {
-      int newRot = (currentPieceRot + 1) % 4;
-      if (!checkTetrisCollision(currentPieceType, newRot, currentPieceX, currentPieceY)) {
-        currentPieceRot = newRot;
-        playTick();
-      }
-    }
-    if (btnEvent == BUTTON_LONG_PRESS) {
-      currentTetrisState = TETRIS_MENU;
-      playCancelTone();
-    }
-  }
-}
+
 
 void drawTetrisApp() {
   if (currentTetrisState == TETRIS_MENU) {
@@ -1748,4 +1020,311 @@ void drawTetrisApp() {
       }
     }
   }
+}
+
+void loop() {
+  unsigned long now = millis();
+  bool uiChanged = false;
+
+  // 0. Global Alarm Checker
+  static int lastRungMinute = -1;
+  struct timeval tv_alarm;
+  gettimeofday(&tv_alarm, NULL);
+  struct tm* timeinfo_alarm = localtime(&tv_alarm.tv_sec);
+  
+  if (alarmEnabled && !alarmActive) {
+    if (timeinfo_alarm->tm_hour == alarmHour && timeinfo_alarm->tm_min == alarmMinute && timeinfo_alarm->tm_min != lastRungMinute) {
+      alarmActive = true;
+      lastRungMinute = timeinfo_alarm->tm_min;
+      currentOSState = OS_APP_ALARM;
+      currentAlarmState = ALARM_STATE_RINGING;
+      uiChanged = true;
+    }
+  }
+
+  // Active Alarm ringing sound (2Hz beep)
+  if (alarmActive) {
+    static unsigned long lastAlarmBeep = 0;
+    if (now - lastAlarmBeep >= 500) {
+      lastAlarmBeep = now;
+      if (systemVolume > 0) {
+        tone(BUZZER_PIN, (systemVolume == 1) ? 1000 : 2000, 200);
+      }
+      uiChanged = true; // Keep screen flashing/redrawing
+    }
+  }
+
+  // 1. App Carousel Position (Instant Snap - no-op)
+
+  // 2. RTC Clock Tick (Update launcher every second)
+  static unsigned long lastClockUpdate = 0;
+  if (currentOSState == OS_LAUNCHER && (now - lastClockUpdate >= 1000)) {
+    lastClockUpdate = now;
+    uiChanged = true;
+  }
+
+  // 3. Battery Tick (non-blocking)
+  if (now - lastBatteryCheckTime >= 2000) {
+    lastBatteryCheckTime = now;
+    updateBatteryMeasurements();
+    uiChanged = true;
+  }
+
+  // 3.5. Pomodoro Timer Countdown Tick (1Hz)
+  if (currentOSState == OS_APP_POMODORO && currentPomoState == POMO_STATE_RUNNING) {
+    static unsigned long lastPomoTick = 0;
+    if (now - lastPomoTick >= 1000) {
+      lastPomoTick = now;
+      if (pomoLeftSeconds > 0) {
+        pomoLeftSeconds--;
+        uiChanged = true;
+      }
+      if (pomoLeftSeconds <= 0) {
+        currentPomoState = POMO_STATE_FINISHED;
+        uiChanged = true;
+        playFinishedMelody();
+      }
+    }
+  }
+
+  // 3.6 Tetris Gravity Tick
+  if (currentOSState == OS_APP_TETRIS && currentTetrisState == TETRIS_PLAYING) {
+    if (now - lastTetrisDrop >= tetrisSpeed) {
+      lastTetrisDrop = now;
+      if (!checkTetrisCollision(currentPieceType, currentPieceRot, currentPieceX, currentPieceY + 1)) {
+        currentPieceY++;
+      } else {
+        lockTetrisPiece();
+      }
+      uiChanged = true;
+    }
+  }
+
+  // 3.7 Reader Tick
+  if (currentOSState == OS_APP_READER && currentReaderState == READER_PLAYING) {
+    unsigned long wordDelay = 60000 / readerWpm;
+    if (now - lastReaderWordTime >= wordDelay) {
+      lastReaderWordTime = now;
+      readerWordIndex++;
+      if (readerWordIndex >= readerTotalWords) {
+        currentReaderState = READER_FINISHED;
+      }
+      uiChanged = true;
+    }
+  }
+
+  // 4. Read Inputs
+  int encoderDelta = readEncoderDelta();
+  ButtonEvent btnEvent = checkButton();
+  if (encoderDelta != 0 || btnEvent != BUTTON_NONE) {
+    uiChanged = true;
+    lastActivityTime = now;
+  }
+
+  // 4.5 Idle Sleep Timer
+  if (now - lastActivityTime >= 60000) {
+    bool canSleep = true;
+    if (currentOSState == OS_APP_POMODORO && currentPomoState == POMO_STATE_RUNNING) canSleep = false;
+    if (currentOSState == OS_APP_READER && currentReaderState == READER_PLAYING) canSleep = false;
+    if (alarmActive) canSleep = false;
+    if (canSleep) goToSleep();
+  }
+
+  // 5. Global Actions
+  if (btnEvent == BUTTON_SLEEP) {
+    goToSleep();
+  } else if (btnEvent == BUTTON_HOME_PRESS) {
+    if (currentOSState == OS_APP_TETRIS) display.setRotation(0);
+    currentOSState = OS_LAUNCHER;
+    playCancelTone();
+  }
+
+  // 6. TimOS State Machine
+  switch (currentOSState) {
+    
+    // --- HOME SCREEN ---
+    case OS_LAUNCHER:
+      if (btnEvent == BUTTON_CLICK) {
+        currentOSState = OS_APP_MENU;
+        playSelectTone();
+      }
+      break;
+
+    // --- APP CAROUSEL ---
+    case OS_APP_MENU:
+      if (encoderDelta != 0) {
+        selectedAppIndex += encoderDelta;
+        if (selectedAppIndex < 0) selectedAppIndex = NUM_APPS - 1;
+        if (selectedAppIndex >= NUM_APPS) selectedAppIndex = 0;
+      }
+      if (btnEvent == BUTTON_CLICK) {
+        // Open Selected App
+        if (selectedAppIndex == 0) currentOSState = OS_APP_POMODORO;
+        else if (selectedAppIndex == 1) currentOSState = OS_APP_ALARM;
+        else if (selectedAppIndex == 2) currentOSState = OS_APP_SETTINGS;
+        else if (selectedAppIndex == 3) {
+          currentOSState = OS_APP_TETRIS;
+          display.setRotation(3); // Inverted Portrait mode
+        }
+        else if (selectedAppIndex == 4) currentOSState = OS_APP_READER;
+        playSelectTone();
+      }
+      if (btnEvent == BUTTON_LONG_PRESS) {
+        currentOSState = OS_LAUNCHER; // Back to home
+        playCancelTone();
+      }
+      break;
+
+    // --- APPS (TimOS Applications) ---
+    case OS_APP_POMODORO:
+      if (currentPomoState == POMO_STATE_MENU) {
+        if (encoderDelta != 0) {
+          selectedPomoMode += encoderDelta;
+          if (selectedPomoMode < 0) selectedPomoMode = 3;
+          if (selectedPomoMode > 3) selectedPomoMode = 0;
+        }
+        if (btnEvent == BUTTON_CLICK) {
+          if (selectedPomoMode < 3) {
+            // Preset Times
+            if (selectedPomoMode == 0) pomoTotalSeconds = 25 * 60;
+            else if (selectedPomoMode == 1) pomoTotalSeconds = 5 * 60;
+            else if (selectedPomoMode == 2) pomoTotalSeconds = 15 * 60;
+            pomoLeftSeconds = pomoTotalSeconds;
+            currentPomoState = POMO_STATE_RUNNING;
+            playSelectTone();
+          } else {
+            // Custom Time Configuration
+            customMinutes = 25;
+            customSeconds = 0;
+            currentPomoState = POMO_STATE_CUSTOM_MINS;
+            playSelectTone();
+          }
+        }
+        if (btnEvent == BUTTON_LONG_PRESS) {
+          currentOSState = OS_APP_MENU; // Back to app launcher
+          playCancelTone();
+        }
+      }
+      else if (currentPomoState == POMO_STATE_CUSTOM_MINS) {
+        if (encoderDelta != 0) {
+          customMinutes += encoderDelta;
+          if (customMinutes < 1) customMinutes = 99; // Constrain between 1 and 99 mins
+          if (customMinutes > 99) customMinutes = 1;
+        }
+        if (btnEvent == BUTTON_CLICK) {
+          currentPomoState = POMO_STATE_CUSTOM_SECS;
+          playSelectTone();
+        }
+        if (btnEvent == BUTTON_LONG_PRESS) {
+          currentPomoState = POMO_STATE_MENU;
+          playCancelTone();
+        }
+      }
+      else if (currentPomoState == POMO_STATE_CUSTOM_SECS) {
+        if (encoderDelta != 0) {
+          customSeconds += encoderDelta;
+          if (customSeconds < 0) customSeconds = 59;
+          if (customSeconds > 59) customSeconds = 0;
+        }
+        if (btnEvent == BUTTON_CLICK) {
+          pomoTotalSeconds = (customMinutes * 60) + customSeconds;
+          if (pomoTotalSeconds > 0) {
+            pomoLeftSeconds = pomoTotalSeconds;
+            currentPomoState = POMO_STATE_RUNNING;
+            playSelectTone();
+          } else {
+            playCancelTone();
+          }
+        }
+        if (btnEvent == BUTTON_LONG_PRESS) {
+          currentPomoState = POMO_STATE_CUSTOM_MINS;
+          playCancelTone();
+        }
+      }
+      else if (currentPomoState == POMO_STATE_RUNNING) {
+        if (btnEvent == BUTTON_CLICK) {
+          currentPomoState = POMO_STATE_PAUSED;
+          playSelectTone();
+        }
+        if (btnEvent == BUTTON_LONG_PRESS) {
+          currentPomoState = POMO_STATE_MENU;
+          playCancelTone();
+        }
+      }
+      else if (currentPomoState == POMO_STATE_PAUSED) {
+        if (btnEvent == BUTTON_CLICK) {
+          currentPomoState = POMO_STATE_RUNNING;
+          playSelectTone();
+        }
+        if (btnEvent == BUTTON_LONG_PRESS) {
+          currentPomoState = POMO_STATE_MENU;
+          playCancelTone();
+        }
+      }
+      else if (currentPomoState == POMO_STATE_FINISHED) {
+        if (encoderDelta != 0) {
+          pomoFinishedSelect = (pomoFinishedSelect == 0) ? 1 : 0;
+        }
+        if (btnEvent == BUTTON_CLICK) {
+          if (pomoFinishedSelect == 0) { // Restart
+            pomoLeftSeconds = pomoTotalSeconds;
+            currentPomoState = POMO_STATE_RUNNING;
+            playSelectTone();
+          } else { // Exit
+            currentPomoState = POMO_STATE_MENU;
+            playCancelTone();
+          }
+        }
+        if (btnEvent == BUTTON_LONG_PRESS) {
+          currentOSState = OS_APP_MENU;
+          playCancelTone();
+        }
+      }
+      break;
+
+    case OS_APP_ALARM:
+      handleAlarmApp(encoderDelta, btnEvent);
+      break;
+
+    case OS_APP_SETTINGS:
+      handleSettingsApp(encoderDelta, btnEvent);
+      break;
+
+    case OS_APP_TETRIS:
+      handleTetrisApp(encoderDelta, btnEvent);
+      break;
+
+    case OS_APP_READER:
+      handleReaderApp(encoderDelta, btnEvent);
+      break;
+  }
+
+  // 7. Draw UI Layer
+  if (uiChanged) {
+    display.clearDisplay();
+    drawBatteryStatus();
+    
+    if (currentOSState == OS_LAUNCHER) {
+      drawLauncher();
+    } else if (currentOSState == OS_APP_MENU) {
+      drawAppMenu();
+    } else if (currentOSState == OS_APP_POMODORO) {
+      drawPomodoroApp();
+    } else if (currentOSState == OS_APP_ALARM) {
+      drawAlarmApp();
+    } else if (currentOSState == OS_APP_SETTINGS) {
+      drawSettingsApp();
+    } else if (currentOSState == OS_APP_TETRIS) {
+      drawTetrisApp();
+    } else if (currentOSState == OS_APP_READER) {
+      drawReaderApp();
+    }
+    
+    display.display();
+  }
+  
+  // 8. Update LED status (breathing, flashing, solid)
+  updateLED();
+
+  delay(1);
 }
