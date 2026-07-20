@@ -8,6 +8,7 @@
 #include "esp_sleep.h"
 #include <sys/time.h>
 #include <Preferences.h>
+#include "CustomReaderFont.h"
 
 Preferences preferences;
 
@@ -41,6 +42,7 @@ OSState currentOSState = OS_LAUNCHER;
 #define NUM_APPS 5
 const char* appNames[NUM_APPS] = {"Pomodoro", "Alarm", "Settings", "Tetris", "Reader"};
 int selectedAppIndex = 0;
+int menuScrollAnimY = 0;
 
 // Pomodoro Variables
 enum PomoState {
@@ -135,6 +137,7 @@ int readerWpm = 250;
 int readerWordIndex = 0;
 int readerTotalWords = 0;
 unsigned long lastReaderWordTime = 0;
+int sessionWordsRead = 0;
 #define MAX_READER_WORDS 100
 String readerWords[MAX_READER_WORDS];
 
@@ -168,6 +171,7 @@ void drawAlarmApp();
 void drawSettingsApp();
 void drawTetrisApp();
 void drawReaderApp();
+String getCurrentWord(int targetIdx);
 void handleAlarmApp(int encoderDelta, ButtonEvent btnEvent);
 void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent);
 void handleTetrisApp(int encoderDelta, ButtonEvent btnEvent);
@@ -189,56 +193,62 @@ void drawAppMenu() {
   int boxSize = 28;     // Compact box size (28x28) to stay clear of bottom text
   int boxY = 16;
   
-  // Circular App Indices: [Left, Center, Right]
-  int appIndices[3] = {
-    (selectedAppIndex - 1 + NUM_APPS) % NUM_APPS,
+  // Circular App Indices: [FarLeft, Left, Center, Right, FarRight]
+  int appIndices[5] = {
+    (selectedAppIndex - 2 + NUM_APPS * 2) % NUM_APPS,
+    (selectedAppIndex - 1 + NUM_APPS * 2) % NUM_APPS,
     selectedAppIndex,
-    (selectedAppIndex + 1) % NUM_APPS
+    (selectedAppIndex + 1) % NUM_APPS,
+    (selectedAppIndex + 2) % NUM_APPS
   };
 
-  int xPositions[3] = {
-    centerX - iconSpacing,
-    centerX,
-    centerX + iconSpacing
+  int xPositions[5] = {
+    centerX - (iconSpacing * 2) + menuScrollAnimY,
+    centerX - iconSpacing + menuScrollAnimY,
+    centerX + menuScrollAnimY,
+    centerX + iconSpacing + menuScrollAnimY,
+    centerX + (iconSpacing * 2) + menuScrollAnimY
   };
 
-  for (int slot = 0; slot < 3; slot++) {
+  // 1. Draw FIXED selection box at center
+  display.fillRoundRect(centerX - (boxSize/2), boxY, boxSize, boxSize, 4, SSD1306_WHITE);
+  
+  // 2. Draw fixed text below the selection box (so the text doesn't slide)
+  display.setTextColor(SSD1306_WHITE);
+  int textW = strlen(appNames[selectedAppIndex]) * 6;
+  display.setCursor(centerX - (textW/2), boxY + boxSize + 6);
+  display.print(appNames[selectedAppIndex]);
+
+  // 3. Draw sliding icons in INVERSE mode
+  display.setTextColor(SSD1306_INVERSE);
+
+  for (int slot = 0; slot < 5; slot++) {
     int appIdx = appIndices[slot];
     int iconX = xPositions[slot];
-    bool isSelected = (slot == 1); // Center slot is selected
     
-    // Draw Icon Box
-    if (isSelected) {
-      display.fillRoundRect(iconX - (boxSize/2), boxY, boxSize, boxSize, 4, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-    } else {
-      display.drawRoundRect(iconX - (boxSize/2), boxY, boxSize, boxSize, 4, SSD1306_WHITE);
-      display.setTextColor(SSD1306_WHITE);
-    }
+    // Icon background boundary (unselected items get an outline)
+    display.drawRoundRect(iconX - (boxSize/2), boxY, boxSize, boxSize, 4, SSD1306_INVERSE);
     
-    // Draw custom vector icon shapes
+    // Draw custom vector icon shapes INVERSE
     if (appIdx == 0) { // Pomodoro: Circle timer
-       display.drawCircle(iconX, boxY + 14, 7, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-       display.drawLine(iconX, boxY + 14, iconX, boxY + 8, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
+       display.drawCircle(iconX, boxY + 14, 7, SSD1306_INVERSE);
+       display.drawLine(iconX, boxY + 14, iconX, boxY + 8, SSD1306_INVERSE);
     } else if (appIdx == 1) { // Alarm: Bell triangle
-       display.fillTriangle(iconX, boxY + 6, iconX - 7, boxY + 18, iconX + 7, boxY + 18, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
+       display.fillTriangle(iconX, boxY + 6, iconX - 7, boxY + 18, iconX + 7, boxY + 18, SSD1306_INVERSE);
     } else if (appIdx == 2) { // Settings: Gear/Sliders
-       display.drawRect(iconX - 5, boxY + 9, 10, 10, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-       display.drawRect(iconX - 2, boxY + 5, 4, 18, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-       display.drawRect(iconX - 8, boxY + 12, 16, 4, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
+       display.drawRect(iconX - 5, boxY + 9, 10, 10, SSD1306_INVERSE);
+       display.drawRect(iconX - 2, boxY + 5, 4, 18, SSD1306_INVERSE);
+       display.drawRect(iconX - 8, boxY + 12, 16, 4, SSD1306_INVERSE);
     } else if (appIdx == 3) { // Tetris: T-Block shape
-       display.fillRect(iconX - 6, boxY + 6, 12, 4, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-       display.fillRect(iconX - 2, boxY + 10, 4, 4, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-    }
-    
-    // Only display name of the selected app in the center to prevent overlaps and bottom-edge clipping
-    if (isSelected) {
-      display.setTextColor(SSD1306_WHITE);
-      int textW = strlen(appNames[appIdx]) * 6;
-      display.setCursor(iconX - (textW/2), boxY + boxSize + 6); // Renders safely at Y=50
-      display.print(appNames[appIdx]);
+       display.fillRect(iconX - 6, boxY + 6, 12, 4, SSD1306_INVERSE);
+       display.fillRect(iconX - 2, boxY + 10, 4, 4, SSD1306_INVERSE);
+    } else if (appIdx == 4) { // Reader: Book shape
+       display.drawRect(iconX - 7, boxY + 8, 7, 10, SSD1306_INVERSE);
+       display.drawRect(iconX, boxY + 8, 7, 10, SSD1306_INVERSE);
+       display.drawLine(iconX, boxY + 8, iconX, boxY + 18, SSD1306_INVERSE);
     }
   }
+  display.setTextColor(SSD1306_WHITE);
 }
 
 void drawBatteryStatus() {
@@ -464,46 +474,48 @@ void drawAlarmApp() {
   display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
 
   if (currentAlarmState == ALARM_STATE_MENU) {
-    // Render alarm status metrics
-    display.setCursor(10, 18);
-    display.print("Status: ");
-    display.print(alarmEnabled ? "ON" : "OFF");
+    const char* options[2] = {"Toggle: ", "Set Time"};
+    int midY = 32;
+    int spacing = 14;
+    extern int menuScrollAnimY;
 
-    display.setCursor(10, 28);
-    display.print("Time  : ");
-    if (use12HourFormat) {
-      int hr = alarmHour;
-      const char* ampm = (hr >= 12) ? "PM" : "AM";
-      hr = hr % 12;
-      if (hr == 0) hr = 12;
-      display.printf("%d:%02d %s", hr, alarmMinute, ampm);
-    } else {
-      display.printf("%02d:%02d", alarmHour, alarmMinute);
+    // 1. Draw FIXED selection box
+    display.fillRect(0, midY - 3, 128, 13, SSD1306_WHITE);
+
+    // 2. Draw sliding text in INVERSE mode
+    display.setTextColor(SSD1306_INVERSE);
+
+    for (int offset = -1; offset <= 1; offset++) {
+      int optIdx = alarmMenuSelect + offset;
+      if (optIdx < 0 || optIdx >= 2) continue; // Only 2 items, don't wrap
+      
+      int drawY = midY + (offset * spacing) + menuScrollAnimY;
+      
+      display.setCursor(10, drawY - 2);
+      display.print(options[optIdx]);
+      
+      if (optIdx == 0) {
+        display.print(alarmEnabled ? "ON" : "OFF");
+      } else if (optIdx == 1) {
+        display.setCursor(76, drawY - 2);
+        if (use12HourFormat) {
+          int hr = alarmHour;
+          const char* ampm = (hr >= 12) ? "PM" : "AM";
+          hr = hr % 12;
+          if (hr == 0) hr = 12;
+          display.printf("%d:%02d%s", hr, alarmMinute, ampm);
+        } else {
+          display.printf("%02d:%02d", alarmHour, alarmMinute);
+        }
+      }
     }
 
-    int toggleX = 16;
-    int setX = 80;
-    int optionY = 44;
-
-    // Toggle menu button
-    if (alarmMenuSelect == 0) {
-      display.fillRect(toggleX - 4, optionY - 2, 44, 12, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-    } else {
-      display.setTextColor(SSD1306_WHITE);
-    }
-    display.setCursor(toggleX, optionY);
-    display.print("Toggle");
-
-    // Set Time menu button
-    if (alarmMenuSelect == 1) {
-      display.fillRect(setX - 4, optionY - 2, 34, 12, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-    } else {
-      display.setTextColor(SSD1306_WHITE);
-    }
-    display.setCursor(setX, optionY);
-    display.print("Set");
+    // 3. Draw clipping mask and title
+    display.fillRect(0, 0, 128, 12, SSD1306_BLACK);
+    display.setTextSize(1);
+    display.setCursor(4, 2);
+    display.print("ALARM CLOCK");
+    display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
 
     display.setTextColor(SSD1306_WHITE);
   }
@@ -696,70 +708,50 @@ void setDisplayBrightness(int level) {
 
 
 void drawSettingsMenu() {
-  display.setTextSize(1);
-  display.setCursor(4, 2);
-  display.print("SETTINGS");
-  display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
-
   const char* options[5] = {"Set Time", "Set Date", "Time Format", "Volume", "Brightness"};
   int midY = 32;
-  int spacing = 12;
+  int spacing = 14;
+  extern int menuScrollAnimY;
 
-  int indices[3] = {
-    (settingsMenuSelect - 1 + 5) % 5,
-    settingsMenuSelect,
-    (settingsMenuSelect + 1) % 5
-  };
+  // 1. Draw FIXED selection box
+  display.fillRect(0, midY - 3, 128, 13, SSD1306_WHITE);
 
-  int yPositions[3] = {
-    midY - spacing,
-    midY,
-    midY + spacing
-  };
+  // 2. Draw sliding text in INVERSE mode
+  display.setTextColor(SSD1306_INVERSE);
 
-  for (int i = 0; i < 3; i++) {
-    int optIdx = indices[i];
-    int drawY = yPositions[i];
-    bool isSelected = (i == 1);
-
-    if (isSelected) {
-      display.fillRect(0, drawY - 3, 128, 11, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-    } else {
-      display.setTextColor(SSD1306_WHITE);
-    }
-
+  for (int offset = -2; offset <= 2; offset++) {
+    int optIdx = (settingsMenuSelect + offset + 5) % 5;
+    int drawY = midY + (offset * spacing) + menuScrollAnimY;
+    
     display.setCursor(10, drawY - 2);
     display.print(options[optIdx]);
     
-    // Render status indicator next to settings slots
+    // Status indicators
     if (optIdx == 2) {
       display.setCursor(90, drawY - 2);
       display.print(use12HourFormat ? "12-HR" : "24-HR");
     } else if (optIdx == 3) {
-      // Mini Volume Progress Bar
       int miniBarX = 90;
       int miniBarY = drawY - 2;
-      int miniBarW = 30;
-      int miniBarH = 7;
-      display.drawRect(miniBarX, miniBarY, miniBarW, miniBarH, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-      int fillVal = (systemVolume * (miniBarW - 4)) / 3;
-      if (fillVal > 0) {
-        display.fillRect(miniBarX + 2, miniBarY + 2, fillVal, miniBarH - 4, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-      }
+      display.drawRect(miniBarX, miniBarY, 30, 7, SSD1306_INVERSE);
+      int fillVal = (systemVolume * 26) / 3;
+      if (fillVal > 0) display.fillRect(miniBarX + 2, miniBarY + 2, fillVal, 3, SSD1306_INVERSE);
     } else if (optIdx == 4) {
-      // Mini Brightness Progress Bar
       int miniBarX = 90;
       int miniBarY = drawY - 2;
-      int miniBarW = 30;
-      int miniBarH = 7;
-      display.drawRect(miniBarX, miniBarY, miniBarW, miniBarH, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-      int fillVal = ((systemBrightness + 1) * (miniBarW - 4)) / 3;
-      if (fillVal > 0) {
-        display.fillRect(miniBarX + 2, miniBarY + 2, fillVal, miniBarH - 4, isSelected ? SSD1306_BLACK : SSD1306_WHITE);
-      }
+      display.drawRect(miniBarX, miniBarY, 30, 7, SSD1306_INVERSE);
+      int fillVal = ((systemBrightness + 1) * 26) / 3;
+      if (fillVal > 0) display.fillRect(miniBarX + 2, miniBarY + 2, fillVal, 3, SSD1306_INVERSE);
     }
   }
+
+  // 3. Draw clipping mask and title
+  display.fillRect(0, 0, 128, 12, SSD1306_BLACK);
+  display.setTextSize(1);
+  display.setCursor(4, 2);
+  display.print("SETTINGS");
+  display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
+  
   display.setTextColor(SSD1306_WHITE);
 }
 
@@ -1101,13 +1093,68 @@ void loop() {
   }
 
   // 3.7 Reader Tick
-  if (currentOSState == OS_APP_READER && currentReaderState == READER_PLAYING) {
-    unsigned long wordDelay = 60000 / readerWpm;
-    if (now - lastReaderWordTime >= wordDelay) {
-      lastReaderWordTime = now;
-      readerWordIndex++;
-      if (readerWordIndex >= readerTotalWords) {
-        currentReaderState = READER_FINISHED;
+  if (currentOSState == OS_APP_READER) {
+    if (currentReaderState == READER_PLAYING) {
+      unsigned long baseDelay = 60000 / readerWpm;
+      unsigned long wordDelay = baseDelay;
+
+      // Soft-start ramp up for first 5 words of reading session
+      if (sessionWordsRead < 5) {
+        float speedFactor = 0.5f + (0.1f * sessionWordsRead); // 50%, 60%, 70%, 80%, 90%
+        wordDelay = (unsigned long)(baseDelay / speedFactor);
+      }
+
+      // Punctuation pause bonus
+      String curr = getCurrentWord(readerWordIndex);
+      if (curr.length() > 0) {
+        char last = curr.charAt(curr.length() - 1);
+        if ((last == '"' || last == '\'' || last == ')' || last == ']') && curr.length() > 1) {
+          last = curr.charAt(curr.length() - 2);
+        }
+        if (last == '.' || last == '!' || last == '?') {
+          wordDelay = (wordDelay * 22) / 10; // 2.2x delay for end of sentence
+        } else if (last == ',' || last == ';' || last == ':') {
+          wordDelay = (wordDelay * 15) / 10; // 1.5x delay for clause breaks
+        }
+        // Dynamic long word delay bonus
+        int len = curr.length();
+        if (len >= 6) {
+          // Add 12% extra time for every character beyond 5
+          int bonusPct = (len - 5) * 12; 
+          wordDelay = wordDelay + (wordDelay * bonusPct) / 100;
+        }
+      }
+
+      if (now - lastReaderWordTime >= wordDelay) {
+        lastReaderWordTime = now;
+        readerWordIndex++;
+        sessionWordsRead++;
+        if (readerWordIndex >= readerTotalWords) {
+          currentReaderState = READER_FINISHED;
+        }
+        uiChanged = true;
+      }
+    } else if (currentReaderState == READER_BOOK_SELECT || currentReaderState == READER_CHAPTER_SELECT) {
+      static unsigned long lastScrollTick = 0;
+      if (now - lastScrollTick >= 200) { // 5 FPS marquee tick to keep rotary encoder 100% responsive
+        lastScrollTick = now;
+        uiChanged = true;
+      }
+    }
+  }
+
+  // 3.8 Menu Scroll Animation Tick
+  if (menuScrollAnimY != 0) {
+    static unsigned long lastAnimTick = 0;
+    if (now - lastAnimTick >= 40) {
+      lastAnimTick = now;
+      int step = abs(menuScrollAnimY) / 3 + 2;
+      if (menuScrollAnimY > 0) {
+        menuScrollAnimY -= step;
+        if (menuScrollAnimY < 0) menuScrollAnimY = 0;
+      } else {
+        menuScrollAnimY += step;
+        if (menuScrollAnimY > 0) menuScrollAnimY = 0;
       }
       uiChanged = true;
     }
@@ -1156,6 +1203,7 @@ void loop() {
         selectedAppIndex += encoderDelta;
         if (selectedAppIndex < 0) selectedAppIndex = NUM_APPS - 1;
         if (selectedAppIndex >= NUM_APPS) selectedAppIndex = 0;
+        menuScrollAnimY = encoderDelta * 48; // Set horizontal animation offset for app menu
       }
       if (btnEvent == BUTTON_CLICK) {
         // Open Selected App
@@ -1182,6 +1230,7 @@ void loop() {
           selectedPomoMode += encoderDelta;
           if (selectedPomoMode < 0) selectedPomoMode = 3;
           if (selectedPomoMode > 3) selectedPomoMode = 0;
+          menuScrollAnimY = encoderDelta * 14;
         }
         if (btnEvent == BUTTON_CLICK) {
           if (selectedPomoMode < 3) {

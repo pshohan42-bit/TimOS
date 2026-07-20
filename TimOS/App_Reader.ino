@@ -13,6 +13,8 @@ static BookItem bookList[MAX_BOOKS];
 static int totalBooks = 0;
 static int selectedBookIdx = 0;
 static bool spiffsInitialized = false;
+static int readerMenuOption = 0; // 0: Resume/Start, 1: Start Over, 2: Speed WPM
+static bool isAdjustingWpm = false;
 
 // We cache word offsets every 100 words to make seeking extremely fast
 #define INDEX_INTERVAL 100
@@ -182,6 +184,24 @@ String getCurrentWord(int targetIdx) {
   }
 }
 
+int findSentenceStart(int targetIdx) {
+  if (targetIdx <= 0) return 0;
+  // Look back up to 40 words for a sentence boundary ('.', '!', '?')
+  for (int i = targetIdx - 1; i >= 0 && i >= targetIdx - 40; i--) {
+    String w = getCurrentWord(i);
+    if (w.length() > 0) {
+      char last = w.charAt(w.length() - 1);
+      if ((last == '"' || last == '\'' || last == ')' || last == ']') && w.length() > 1) {
+        last = w.charAt(w.length() - 2);
+      }
+      if (last == '.' || last == '!' || last == '?') {
+        return i + 1; // Sentence starts at the following word
+      }
+    }
+  }
+  return targetIdx;
+}
+
 void saveReaderProgress() {
   String key = "spiffs_p_" + String(selectedBookIdx);
   preferences.putInt(key.c_str(), readerWordIndex);
@@ -189,69 +209,134 @@ void saveReaderProgress() {
 
 void loadReaderProgress() {
   String key = "spiffs_p_" + String(selectedBookIdx);
-  readerWordIndex = preferences.getInt(key.c_str(), 0);
+  int savedIdx = preferences.getInt(key.c_str(), 0);
+  readerWordIndex = findSentenceStart(savedIdx);
 }
 
 void drawReaderApp() {
   initSPIFFS();
 
   if (currentReaderState == READER_BOOK_SELECT || currentReaderState == READER_CHAPTER_SELECT) {
+    if (totalBooks == 0) {
+      display.setCursor(4, 25);
+      display.print("No .txt files in SPIFFS!");
+      display.setCursor(4, 38);
+      display.print("Run upload_books.py");
+    } else {
+      display.setTextWrap(false);
+      extern int menuScrollAnimY;
+      int centerSlotY = 29;
+
+      // 1. Draw FIXED selection box
+      display.fillRect(0, centerSlotY - 1, 128, 13, SSD1306_WHITE);
+      
+      // 2. Draw sliding text in INVERSE mode (automatically turns black over the white box!)
+      display.setTextColor(SSD1306_INVERSE);
+
+      for (int offset = -2; offset <= 2; offset++) {
+        int i = selectedBookIdx + offset;
+        
+        if (totalBooks >= 5) {
+          while (i < 0) i += totalBooks;
+          i = i % totalBooks;
+        } else {
+          if (i < 0 || i >= totalBooks) continue;
+        }
+
+        int y = centerSlotY + (offset * 15) + menuScrollAnimY;
+        int nameWidth = bookList[i].name.length() * 6;
+        int scrollX = 2;
+
+        // Marquee for the selected center item
+        if (offset == 0 && nameWidth > 124) {
+          int overflowChars = (nameWidth - 110) / 6 + 1;
+          int cycle = (millis() / 200) % (overflowChars + 6);
+          if (cycle < 2) {
+            scrollX = 2;
+          } else if (cycle < 2 + overflowChars) {
+            scrollX = 2 - ((cycle - 2) * 6);
+          } else {
+            scrollX = 2 - (overflowChars * 6);
+          }
+        }
+
+        display.setCursor(scrollX, y);
+        display.print(bookList[i].name);
+      }
+      display.setTextColor(SSD1306_WHITE);
+      display.setTextWrap(true);
+    }
+
+    // 3. Draw clipping mask and title bar on top of the scrolling list!
+    display.fillRect(0, 0, 128, 11, SSD1306_BLACK);
     display.setTextSize(1);
     display.setCursor(20, 0);
     display.print("SELECT BOOK");
     display.drawFastHLine(0, 10, 128, SSD1306_WHITE);
 
-    if (totalBooks == 0) {
-      display.setCursor(4, 25);
-      display.print("No .txt files in SPIFFS!");
-      display.setCursor(4, 38);
-      display.print("[Click] Read Sample");
-    } else {
-      int visibleTop = (selectedBookIdx / 3) * 3;
-      for (int i = visibleTop; i < visibleTop + 3 && i < totalBooks; i++) {
-        int slot = i - visibleTop;
-        int y = 16 + (slot * 13);
-        if (i == selectedBookIdx) {
-          display.fillRect(0, y - 1, 128, 11, SSD1306_WHITE);
-          display.setTextColor(SSD1306_BLACK);
-        } else {
-          display.setTextColor(SSD1306_WHITE);
-        }
-        display.setCursor(2, y);
-        display.print(bookList[i].name);
-      }
-      display.setTextColor(SSD1306_WHITE);
-    }
-    display.setCursor(0, 56);
-    display.print("[Click] Open  [Hold] Exit");
-
   } else if (currentReaderState == READER_MENU) {
     display.setTextSize(1);
     display.setCursor(0, 0);
+    display.setTextWrap(false);
     if (totalBooks > 0 && selectedBookIdx < totalBooks) {
       display.print(bookList[selectedBookIdx].name);
     } else {
       display.print("Sample Reader");
     }
+    display.setTextWrap(true);
     display.drawFastHLine(0, 10, 128, SSD1306_WHITE);
 
-    display.setCursor(5, 16);
-    display.print("Resume: ");
-    display.print(readerWordIndex);
-    display.print("/");
-    display.print(readerTotalWords);
+    // Option 0: Resume / Start Reading
+    int y0 = 16;
+    if (readerMenuOption == 0) {
+      display.fillRect(0, y0 - 1, 128, 11, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(2, y0);
+    if (readerWordIndex > 0) {
+      display.print("Resume (w:");
+      display.print(readerWordIndex);
+      display.print("/");
+      display.print(readerTotalWords);
+      display.print(")");
+    } else {
+      display.print("Start Reading >");
+    }
 
-    display.setCursor(5, 30);
-    display.print("WPM Speed:");
-    display.setTextSize(2);
-    display.setCursor(5, 40);
+    // Option 1: Start Over
+    int y1 = 29;
+    if (readerMenuOption == 1) {
+      display.fillRect(0, y1 - 1, 128, 11, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(2, y1);
+    display.print("Restart from Word 0");
+
+    // Option 2: WPM Speed
+    int y2 = 42;
+    if (readerMenuOption == 2) {
+      if (isAdjustingWpm) {
+        display.fillRect(0, y2 - 1, 128, 11, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.drawRect(0, y2 - 1, 128, 11, SSD1306_WHITE); // Hollow highlight
+        display.setTextColor(SSD1306_WHITE);
+      }
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(2, y2);
+    display.print("Speed: ");
+    if (readerMenuOption == 2 && isAdjustingWpm && (millis() / 300) % 2 == 0) display.print("< ");
     display.print(readerWpm);
-    display.setTextSize(1);
-    display.setCursor(55, 47);
-    display.print("wpm");
+    if (readerMenuOption == 2 && isAdjustingWpm && (millis() / 300) % 2 == 0) display.print(" >");
+    display.print(" wpm");
 
-    display.setCursor(0, 56);
-    display.print("[Click] Start [Hold] Back");
+    display.setTextColor(SSD1306_WHITE);
 
   } else if (currentReaderState == READER_PLAYING || currentReaderState == READER_PAUSED) {
     display.setTextSize(1);
@@ -263,45 +348,67 @@ void drawReaderApp() {
       display.print("[PAUSED]");
     }
 
-    display.drawFastVLine(45, 18, 4, SSD1306_WHITE);
-    display.drawFastVLine(45, 44, 4, SSD1306_WHITE);
-    display.drawFastHLine(0, 22, 128, SSD1306_WHITE);
-    display.drawFastHLine(0, 43, 128, SSD1306_WHITE);
+    // Upper and lower focus indication marks (NO horizontal lines)
+    display.drawFastVLine(45, 18, 5, SSD1306_WHITE);
+    display.drawFastVLine(45, 42, 5, SSD1306_WHITE);
 
     if (readerWordIndex < readerTotalWords) {
       String currWord = getCurrentWord(readerWordIndex);
 
+      display.setTextWrap(false);
       int len = currWord.length();
       int orp = 0;
       if (len > 1) orp = 1;
       if (len > 5) orp = 2;
       if (len > 9) orp = 3;
+      if (len > 13) orp = 4;
 
       int pivotX = 45;
-      int ts = 2;
-      int charWidth = 12;
-      int currStartX = (pivotX - 6) - (orp * charWidth);
-      int currEndX = currStartX + (len * charWidth);
-      int currY = 26;
+      int charWidth, currY;
 
-      if (currStartX < 0 || currEndX > 128) {
-        ts = 1;
-        charWidth = 6;
-        currStartX = (pivotX - 3) - (orp * charWidth);
-        currY = 30;
-      }
+      if (len <= 10) {
+        // Tier 1: Default Size 2 (12px wide, 16px tall) — big & bold
+        charWidth = 12;
+        currY = 24;
+        int currStartX = (pivotX - 6) - (orp * charWidth);
+        if (currStartX < 0) currStartX = 0;
+        if (currStartX + (len * charWidth) > 128) currStartX = 128 - (len * charWidth);
 
-      display.setTextWrap(false);
-      display.setTextSize(ts);
-      display.setCursor(currStartX, currY);
-      display.print(currWord);
+        display.setFont(NULL);
+        display.setTextSize(2);
+        display.setCursor(currStartX, currY);
+        display.print(currWord);
+      } else if (len <= 16) {
+        // Tier 2: CustomReaderFont (8px wide, ~11px tall) — clean medium
+        charWidth = 8;
+        currY = 34;
+        int currStartX = (pivotX - 4) - (orp * charWidth);
+        if (currStartX < 0) currStartX = 0;
+        if (currStartX + (len * charWidth) > 128) currStartX = 128 - (len * charWidth);
 
-      if (ts == 2) {
-        display.fillRect(pivotX - 7, currY - 2, 14, 19, SSD1306_INVERSE);
+        display.setFont(&CustomReaderFont);
+        display.setTextSize(1);
+        display.setCursor(currStartX, currY);
+        display.print(currWord);
+        display.setFont(NULL);
       } else {
-        display.fillRect(pivotX - 4, currY - 2, 8, 11, SSD1306_INVERSE);
+        // Tier 3: Default Size 1 (6px wide, 8px tall) — compact fallback
+        charWidth = 6;
+        currY = 28;
+        int currStartX = (pivotX - 3) - (orp * charWidth);
+        if (currStartX < 0) currStartX = 0;
+        if (currStartX + (len * charWidth) > 128) currStartX = 128 - (len * charWidth);
+
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setCursor(currStartX, currY);
+        display.print(currWord);
       }
+
+      display.setFont(NULL);
+      display.setTextSize(1);
       display.setTextWrap(true);
+
     }
 
     int progress = (readerTotalWords > 0) ? (readerWordIndex * 128) / readerTotalWords : 0;
@@ -310,11 +417,8 @@ void drawReaderApp() {
 
   } else if (currentReaderState == READER_FINISHED) {
     display.setTextSize(2);
-    display.setCursor(20, 15);
+    display.setCursor(20, 20);
     display.print("FINISHED");
-    display.setTextSize(1);
-    display.setCursor(15, 40);
-    display.print("Click to restart");
   }
 }
 
@@ -326,6 +430,8 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
       selectedBookIdx += encoderDelta;
       if (selectedBookIdx < 0) selectedBookIdx = totalBooks - 1;
       if (selectedBookIdx >= totalBooks) selectedBookIdx = 0;
+      extern int menuScrollAnimY;
+      menuScrollAnimY = encoderDelta * 15;
     }
     if (btnEvent == BUTTON_CLICK) {
       if (totalBooks > 0) {
@@ -346,6 +452,8 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
       }
       loadReaderProgress();
       cachedWordIndex = -1; // Reset cache
+      readerMenuOption = 0; // Reset menu selection
+      isAdjustingWpm = false;
       currentReaderState = READER_MENU;
       playSelectTone();
     }
@@ -355,16 +463,37 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
     }
   } else if (currentReaderState == READER_MENU) {
     if (encoderDelta != 0) {
-      readerWpm += encoderDelta * 25;
-      if (readerWpm < 50) readerWpm = 50;
-      if (readerWpm > 1000) readerWpm = 1000;
+      if (readerMenuOption == 2 && isAdjustingWpm) {
+        // Adjust WPM speed directly when Speed item is highlighted and active
+        readerWpm += encoderDelta * 25;
+        if (readerWpm < 50) readerWpm = 50;
+        if (readerWpm > 1000) readerWpm = 1000;
+      } else {
+        readerMenuOption += encoderDelta;
+        if (readerMenuOption < 0) readerMenuOption = 2;
+        if (readerMenuOption > 2) readerMenuOption = 0;
+      }
     }
     if (btnEvent == BUTTON_CLICK) {
-      currentReaderState = READER_PLAYING;
-      lastReaderWordTime = millis();
-      playSelectTone();
+      if (readerMenuOption == 0) { // Resume / Start Reading
+        currentReaderState = READER_PLAYING;
+        sessionWordsRead = 0;
+        lastReaderWordTime = millis();
+        playSelectTone();
+      } else if (readerMenuOption == 1) { // Restart from Beginning
+        readerWordIndex = 0;
+        saveReaderProgress();
+        currentReaderState = READER_PLAYING;
+        sessionWordsRead = 0;
+        lastReaderWordTime = millis();
+        playSelectTone();
+      } else if (readerMenuOption == 2) { // Toggle WPM adjustment mode
+        isAdjustingWpm = !isAdjustingWpm;
+        playSelectTone();
+      }
     }
     if (btnEvent == BUTTON_LONG_PRESS) {
+      isAdjustingWpm = false;
       currentReaderState = READER_BOOK_SELECT;
       playCancelTone();
     }
@@ -393,6 +522,7 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
     }
     if (btnEvent == BUTTON_CLICK) {
       currentReaderState = READER_PLAYING;
+      sessionWordsRead = 0;
       lastReaderWordTime = millis();
       playSelectTone();
     }

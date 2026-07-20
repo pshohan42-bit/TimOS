@@ -18,7 +18,11 @@ void handleAlarmApp(int encoderDelta, ButtonEvent btnEvent) {
   switch (currentAlarmState) {
     case ALARM_STATE_MENU:
       if (encoderDelta != 0) {
-        alarmMenuSelect = (alarmMenuSelect == 0) ? 1 : 0;
+        alarmMenuSelect += encoderDelta;
+        if (alarmMenuSelect < 0) alarmMenuSelect = 1;
+        if (alarmMenuSelect > 1) alarmMenuSelect = 0;
+        extern int menuScrollAnimY;
+        menuScrollAnimY = encoderDelta * 14;
       }
       if (btnEvent == BUTTON_CLICK) {
         if (alarmMenuSelect == 0) { // Toggle status
