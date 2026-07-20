@@ -132,8 +132,14 @@ const uint16_t tetrominoes[7][4] = {
 };
 
 // Reader Variables
-enum ReaderState { READER_BOOK_SELECT, READER_CHAPTER_SELECT, READER_MENU, READER_PLAYING, READER_PAUSED, READER_FINISHED };
-ReaderState currentReaderState = READER_BOOK_SELECT;
+enum ReaderState { READER_HOME, READER_BOOK_SELECT, READER_CHAPTER_SELECT, READER_MENU, READER_PLAYING, READER_PAUSED, READER_FINISHED, READER_SETTINGS };
+int readerPuncMode = 0; // 0=Norm, 1=Long, 2=Off
+int readerLongMode = 0; // 0=Norm, 1=Long, 2=Off
+int readerFontMode = 0; // 0=Auto, 1=Big, 2=Med, 3=Small
+int readerSetMenuIdx = 0;
+ReaderState currentReaderState = READER_HOME;
+unsigned long readerMarqueeStartTime = 0;
+int readerHomeOption = 0;
 int readerWpm = 250;
 int readerWordIndex = 0;
 int readerTotalWords = 0;
@@ -176,6 +182,7 @@ void handleAlarmApp(int encoderDelta, ButtonEvent btnEvent);
 void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent);
 void handleTetrisApp(int encoderDelta, ButtonEvent btnEvent);
 void handleReaderApp(int encoderDelta, ButtonEvent btnEvent);
+void handlePomodoroApp(int encoderDelta, ButtonEvent btnEvent);
 bool checkTetrisCollision(int pType, int pRot, int pX, int pY);
 void lockTetrisPiece();
 void spawnTetrisPiece();
@@ -190,7 +197,13 @@ void setup() {
   alarmEnabled = preferences.getBool("alarmEn", false);
   alarmHour = preferences.getInt("alarmHr", 6);
   alarmMinute = preferences.getInt("alarmMin", 0);
-  readerWpm = preferences.getInt("wpm", 250); // Restore WPM (#22)
+  readerWpm = preferences.getInt("wpm", 250);
+  readerPuncMode = preferences.getInt("rPunc", 0);
+  readerLongMode = preferences.getInt("rLong", 0);
+  readerFontMode = preferences.getInt("rFont", 0);
+  readerPuncMode = preferences.getInt("rPunc", 0);
+  readerLongMode = preferences.getInt("rLong", 0);
+  readerFontMode = preferences.getInt("rFont", 0); // Restore WPM (#22)
 
   // Initialize RTC time (dummy time for testing Launcher)
   struct timeval tv;
@@ -232,6 +245,57 @@ void setup() {
   delay(1000);
 }
 
+
+void drawLauncher() {
+  drawBatteryStatus(); // Launcher needs its own battery call since it skips unified top bar
+  
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  struct tm* timeinfo = localtime(&tv.tv_sec);
+  
+  char digitsStr[10];
+  const char* ampm = "";
+  
+  if (use12HourFormat) {
+    int hr = timeinfo->tm_hour;
+    ampm = (hr >= 12) ? "PM" : "AM";
+    hr = hr % 12;
+    if (hr == 0) hr = 12;
+    sprintf(digitsStr, "%d:%02d", hr, timeinfo->tm_min);
+  } else {
+    strftime(digitsStr, sizeof(digitsStr), "%H:%M", timeinfo);
+  }
+  
+  // Format Date (e.g. "Mon, 15 Jul")
+  char dateStr[20];
+  strftime(dateStr, sizeof(dateStr), "%a, %d %b", timeinfo);
+
+  // Big Clock Digits
+  display.setTextSize(3);
+  int digitsWidth = strlen(digitsStr) * 18; 
+  int startX = 64 - (digitsWidth / 2);
+  
+  // If showing AM/PM, offset slightly left to balance the AM/PM width
+  if (use12HourFormat) {
+    startX = 64 - ((digitsWidth + 14) / 2);
+  }
+  
+  display.setCursor(startX, 16);
+  display.print(digitsStr);
+  
+  // Small AM/PM
+  if (use12HourFormat) {
+    display.setTextSize(1);
+    display.setCursor(startX + digitsWidth + 2, 16);
+    display.print(ampm);
+  }
+  
+  // Small Date
+  display.setTextSize(1);
+  int dateWidth = strlen(dateStr) * 6;
+  display.setCursor(64 - (dateWidth/2), 48);
+  display.print(dateStr);
+}
 
 void drawAppMenu() {
   // Top Title Bar
@@ -316,185 +380,57 @@ void drawBatteryStatus() {
   }
 }
 
-/* ========================================================================== */
-/*                             POMODORO APPLICATION                           */
-/* ========================================================================== */
-
-void drawPomoMenu() {
+void drawTopBar() {
+  if (currentOSState == OS_APP_TETRIS || currentOSState == OS_LAUNCHER) return;
+  
+  // Clear the top area so it overlays over any app's old top bar
+  display.fillRect(0, 0, 128, 13, SSD1306_BLACK);
+  
   display.setTextSize(1);
-  display.setCursor(4, 2);
-  display.print("POMODORO");
-  display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
-
-  // Vertical snapping carousel: [Top, Center (Selected), Bottom]
-  int midY = 32;
-  int spacing = 14;
-
-  int indices[3] = {
-    (selectedPomoMode - 1 + 4) % 4,
-    selectedPomoMode,
-    (selectedPomoMode + 1) % 4
-  };
-
-  int yPositions[3] = {
-    midY - spacing,
-    midY,
-    midY + spacing
-  };
-
-  for (int i = 0; i < 3; i++) {
-    int modeIdx = indices[i];
-    int drawY = yPositions[i];
-    bool isSelected = (i == 1);
-
-    if (isSelected) {
-      display.fillRect(0, drawY - 4, 128, 12, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-    } else {
-      display.setTextColor(SSD1306_WHITE);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 2);
+  
+  if (currentOSState == OS_APP_MENU) display.print("APPS");
+  else if (currentOSState == OS_APP_POMODORO) {
+    if (currentPomoState == POMO_STATE_CUSTOM_MINS || currentPomoState == POMO_STATE_CUSTOM_SECS) display.print("CUSTOM TIME");
+    else if (currentPomoState == POMO_STATE_FINISHED) display.print("POMODORO: DONE");
+    else display.print("POMODORO");
+  }
+  else if (currentOSState == OS_APP_ALARM) {
+    extern bool alarmActive;
+    if (alarmActive) display.print("ALARM ACTIVE");
+    else display.print("ALARM CLOCK");
+  }
+  else if (currentOSState == OS_APP_SETTINGS) display.print("SETTINGS");
+  else if (currentOSState == OS_APP_READER) {
+    extern String getReaderTopBarText();
+    String txt = getReaderTopBarText();
+    // Prevent overlap with time/battery by truncating if necessary
+    if (txt.length() > 12) {
+      txt = txt.substring(0, 10) + "..";
     }
-
-    int textW = strlen(pomoModes[modeIdx]) * 6;
-    display.setCursor(64 - (textW/2), drawY - 2);
-    display.print(pomoModes[modeIdx]);
+    display.print(txt);
   }
-  display.setTextColor(SSD1306_WHITE);
-}
 
-void drawCustomTimeInput(bool editingMins) {
-  display.setTextSize(1);
-  display.setCursor(4, 2);
-  display.print("POMODORO: CUSTOM");
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  struct tm* timeinfo = localtime(&tv.tv_sec);
+  char timeStr[10];
+  if (use12HourFormat) {
+    int hr = timeinfo->tm_hour % 12;
+    if (hr == 0) hr = 12;
+    sprintf(timeStr, "%d:%02d", hr, timeinfo->tm_min);
+  } else {
+    sprintf(timeStr, "%02d:%02d", timeinfo->tm_hour, timeinfo->tm_min);
+  }
+  int timeW = strlen(timeStr) * 6;
+  display.setCursor(104 - timeW, 2);
+  display.print(timeStr);
+
+  drawBatteryStatus();
   display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
-
-  display.setCursor(4, 18); // Centered text to prevent wrap-around clipping
-  display.print("Set Session Duration");
-
-  display.setTextSize(2);
-  
-  // Minutes Input Field
-  if (editingMins) {
-    display.fillRect(18, 32, 32, 20, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-  } else {
-    display.setTextColor(SSD1306_WHITE);
-  }
-  display.setCursor(22, 34);
-  display.printf("%02d", customMinutes);
-  
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(54, 40);
-  display.print("m");
-
-  // Colon Separator
-  display.setTextSize(2);
-  display.setCursor(68, 34);
-  display.print(":");
-
-  // Seconds Input Field
-  if (!editingMins) {
-    display.fillRect(80, 32, 32, 20, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-  } else {
-    display.setTextColor(SSD1306_WHITE);
-  }
-  display.setCursor(84, 34);
-  display.printf("%02d", customSeconds);
-  
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(116, 40);
-  display.print("s");
 }
 
-void drawPomoCountdown(const char* header) {
-  display.setTextSize(1);
-  display.setCursor(4, 2);
-  display.print("POMODORO: ");
-  display.print(header);
-  display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
-
-  int mins = pomoLeftSeconds / 60;
-  int secs = pomoLeftSeconds % 60;
-  char countStr[10];
-  sprintf(countStr, "%02d:%02d", mins, secs);
-
-  // Large timer count
-  display.setTextSize(3);
-  int w = strlen(countStr) * 18;
-  display.setCursor(64 - (w/2), 18);
-  display.print(countStr);
-
-  // Inverted Progress Bar (starts empty, fills up to full as time runs down)
-  int barY = 48;
-  int barH = 8;
-  display.drawRect(0, barY, 128, barH, SSD1306_WHITE);
-  
-  int filledWidth = 0;
-  if (pomoTotalSeconds > 0) {
-    float progress = (float)(pomoTotalSeconds - pomoLeftSeconds) / pomoTotalSeconds;
-    filledWidth = (int)(progress * 124); // Account for border spacing
-  }
-  if (filledWidth > 0) {
-    display.fillRect(2, barY + 2, filledWidth, barH - 4, SSD1306_WHITE);
-  }
-
-  // Back indicator
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(20, 57);
-  display.print("[Hold SW to Menu]");
-}
-
-void drawPomoFinished() {
-  display.setTextSize(1);
-  display.setCursor(4, 2);
-  display.print("POMODORO: DONE");
-  display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
-
-  display.setTextSize(2);
-  display.setCursor(16, 16);
-  display.print("CONGRATS!");
-
-  display.setTextSize(1);
-  int restartX = 16;
-  int exitX = 84;
-  int optionY = 40;
-
-  // Restart option
-  if (pomoFinishedSelect == 0) {
-    display.fillRect(restartX - 4, optionY - 2, 50, 12, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-  } else {
-    display.setTextColor(SSD1306_WHITE);
-  }
-  display.setCursor(restartX, optionY);
-  display.print("Restart");
-
-  // Exit option
-  if (pomoFinishedSelect == 1) {
-    display.fillRect(exitX - 4, optionY - 2, 32, 12, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-  } else {
-    display.setTextColor(SSD1306_WHITE);
-  }
-  display.setCursor(exitX, optionY);
-  display.print("Exit");
-
-  display.setTextColor(SSD1306_WHITE);
-}
-
-void drawPomodoroApp() {
-  switch (currentPomoState) {
-    case POMO_STATE_MENU:        drawPomoMenu(); break;
-    case POMO_STATE_CUSTOM_MINS: drawCustomTimeInput(true); break;
-    case POMO_STATE_CUSTOM_SECS: drawCustomTimeInput(false); break;
-    case POMO_STATE_RUNNING:     drawPomoCountdown("RUNNING"); break;
-    case POMO_STATE_PAUSED:      drawPomoCountdown("PAUSED"); break;
-    case POMO_STATE_FINISHED:    drawPomoFinished(); break;
-  }
-}
 
 /* ========================================================================== */
 /*                              ALARM APPLICATION                             */
@@ -759,6 +695,8 @@ void setDisplayBrightness(int level) {
 
 
 void drawSettingsMenu() {
+  display.setTextSize(1); // Fix: Reset font size when returning from submenus!
+  
   const char* options[5] = {"Set Time", "Set Date", "Time Format", "Volume", "Brightness"};
   int midY = 32;
   int spacing = 14;
@@ -1172,16 +1110,16 @@ void loop() {
         if ((last == '"' || last == '\'' || last == ')' || last == ']') && curr.length() > 1) {
           last = curr.charAt(curr.length() - 2);
         }
-        if (last == '.' || last == '!' || last == '?') {
-          wordDelay = (wordDelay * 22) / 10; // 2.2x delay for end of sentence
-        } else if (last == ',' || last == ';' || last == ':') {
-          wordDelay = (wordDelay * 15) / 10; // 1.5x delay for clause breaks
+        if (readerPuncMode != 2) {
+          if (last == '.' || last == '!' || last == '?') {
+            wordDelay = (wordDelay * (readerPuncMode == 1 ? 30 : 22)) / 10;
+          } else if (last == ',' || last == ';' || last == ':') {
+            wordDelay = (wordDelay * (readerPuncMode == 1 ? 20 : 15)) / 10;
+          }
         }
-        // Dynamic long word delay bonus
         int len = curr.length();
-        if (len >= 6) {
-          // Add 12% extra time for every character beyond 5
-          int bonusPct = (len - 5) * 12; 
+        if (readerLongMode != 2 && len >= 6) {
+          int bonusPct = (len - 5) * (readerLongMode == 1 ? 25 : 12); 
           wordDelay = wordDelay + (wordDelay * bonusPct) / 100;
         }
       }
@@ -1280,6 +1218,8 @@ void loop() {
         else if (selectedAppIndex == 4) {
           currentOSState = OS_APP_READER;
           initSPIFFS(); // Initialize SPIFFS once on entry (#15)
+          currentReaderState = READER_HOME;
+          readerHomeOption = 0;
         }
         playSelectTone();
       }
@@ -1291,112 +1231,7 @@ void loop() {
 
     // --- APPS (TimOS Applications) ---
     case OS_APP_POMODORO:
-      if (currentPomoState == POMO_STATE_MENU) {
-        if (encoderDelta != 0) {
-          selectedPomoMode += encoderDelta;
-          if (selectedPomoMode < 0) selectedPomoMode = 3;
-          if (selectedPomoMode > 3) selectedPomoMode = 0;
-          menuScrollAnimY = encoderDelta * 14;
-        }
-        if (btnEvent == BUTTON_CLICK) {
-          if (selectedPomoMode < 3) {
-            // Preset Times
-            if (selectedPomoMode == 0) pomoTotalSeconds = 25 * 60;
-            else if (selectedPomoMode == 1) pomoTotalSeconds = 5 * 60;
-            else if (selectedPomoMode == 2) pomoTotalSeconds = 15 * 60;
-            pomoLeftSeconds = pomoTotalSeconds;
-            currentPomoState = POMO_STATE_RUNNING;
-            playSelectTone();
-          } else {
-            // Custom Time Configuration
-            customMinutes = 25;
-            customSeconds = 0;
-            currentPomoState = POMO_STATE_CUSTOM_MINS;
-            playSelectTone();
-          }
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentOSState = OS_APP_MENU; // Back to app launcher
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_CUSTOM_MINS) {
-        if (encoderDelta != 0) {
-          customMinutes += encoderDelta;
-          if (customMinutes < 1) customMinutes = 99; // Constrain between 1 and 99 mins
-          if (customMinutes > 99) customMinutes = 1;
-        }
-        if (btnEvent == BUTTON_CLICK) {
-          currentPomoState = POMO_STATE_CUSTOM_SECS;
-          playSelectTone();
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentPomoState = POMO_STATE_MENU;
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_CUSTOM_SECS) {
-        if (encoderDelta != 0) {
-          customSeconds += encoderDelta;
-          if (customSeconds < 0) customSeconds = 59;
-          if (customSeconds > 59) customSeconds = 0;
-        }
-        if (btnEvent == BUTTON_CLICK) {
-          pomoTotalSeconds = (customMinutes * 60) + customSeconds;
-          if (pomoTotalSeconds > 0) {
-            pomoLeftSeconds = pomoTotalSeconds;
-            currentPomoState = POMO_STATE_RUNNING;
-            playSelectTone();
-          } else {
-            playCancelTone();
-          }
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentPomoState = POMO_STATE_CUSTOM_MINS;
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_RUNNING) {
-        if (btnEvent == BUTTON_CLICK) {
-          pomoStartEpoch = 0; // Reset RTC reference so it re-initializes on resume
-          currentPomoState = POMO_STATE_PAUSED;
-          playSelectTone();
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          pomoStartEpoch = 0; // Reset RTC reference
-          currentPomoState = POMO_STATE_MENU;
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_PAUSED) {
-        if (btnEvent == BUTTON_CLICK) {
-          currentPomoState = POMO_STATE_RUNNING;
-          playSelectTone();
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentPomoState = POMO_STATE_MENU;
-          playCancelTone();
-        }
-      }
-      else if (currentPomoState == POMO_STATE_FINISHED) {
-        if (encoderDelta != 0) {
-          pomoFinishedSelect = (pomoFinishedSelect == 0) ? 1 : 0;
-        }
-        if (btnEvent == BUTTON_CLICK) {
-          if (pomoFinishedSelect == 0) { // Restart
-            pomoLeftSeconds = pomoTotalSeconds;
-            currentPomoState = POMO_STATE_RUNNING;
-            playSelectTone();
-          } else { // Exit
-            currentPomoState = POMO_STATE_MENU;
-            playCancelTone();
-          }
-        }
-        if (btnEvent == BUTTON_LONG_PRESS) {
-          currentOSState = OS_APP_MENU;
-          playCancelTone();
-        }
-      }
+      handlePomodoroApp(encoderDelta, btnEvent);
       break;
 
     case OS_APP_ALARM:
@@ -1419,7 +1254,6 @@ void loop() {
   // 7. Draw UI Layer
   if (uiChanged) {
     display.clearDisplay();
-    if (currentOSState != OS_APP_TETRIS) drawBatteryStatus(); // Skip in Tetris rotated mode (#8)
     
     if (currentOSState == OS_LAUNCHER) {
       drawLauncher();
@@ -1437,7 +1271,10 @@ void loop() {
       drawReaderApp();
     }
     
+    drawTopBar(); // Draw unified top bar on top of any app (except tetris/launcher)
+
     display.display();
+    uiChanged = false;
   }
   
   // 8. Update LED status (breathing, flashing, solid)

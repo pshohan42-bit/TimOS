@@ -213,7 +213,76 @@ void loadReaderProgress() {
   readerWordIndex = findSentenceStart(savedIdx);
 }
 
+String getReaderTopBarText() {
+  if (currentReaderState == READER_HOME) return "TIMOS READER";
+  if (currentReaderState == READER_BOOK_SELECT) return "SELECT BOOK";
+  if (currentReaderState == READER_SETTINGS) return "READER SETTINGS";
+  if (currentReaderState == READER_MENU) {
+    if (totalBooks > 0 && selectedBookIdx < totalBooks) return bookList[selectedBookIdx].name;
+    return "Sample Reader";
+  }
+  if (currentReaderState == READER_PLAYING || currentReaderState == READER_PAUSED) {
+    String t = String(readerWpm) + "WPM";
+    if (currentReaderState == READER_PAUSED) t += " [||]";
+    return t;
+  }
+  return "READER";
+}
+
 void drawReaderApp() {
+
+  if (currentReaderState == READER_HOME) {
+    display.setTextSize(1);
+    display.setCursor(4, 2);
+    display.print("TIMOS READER");
+    display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
+
+    int y[2] = {26, 44};
+    const char* opts[2] = {"Read Books", "Global Settings"};
+    
+    for (int i=0; i<2; i++) {
+      if (readerHomeOption == i) {
+        display.fillRect(0, y[i] - 1, 128, 11, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+      display.setCursor(2, y[i]);
+      display.print(opts[i]);
+    }
+    display.setTextColor(SSD1306_WHITE);
+    return;
+  }
+  
+  if (currentReaderState == READER_SETTINGS) {
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("READER SETTINGS");
+    display.drawFastHLine(0, 10, 128, SSD1306_WHITE);
+    
+    const char* puncLabels[] = {"Normal", "Long", "Off"};
+    const char* longLabels[] = {"Normal", "Long", "Off"};
+    const char* fontLabels[] = {"Auto", "Big", "Med", "Small"};
+    
+    int y[3] = {16, 29, 42};
+    for (int i=0; i<3; i++) {
+      if (readerSetMenuIdx == i) {
+        display.fillRect(0, y[i] - 1, 128, 11, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+      display.setCursor(2, y[i]);
+      if (i == 0) { display.print("Punc. Pause: "); display.print(puncLabels[readerPuncMode]); }
+      if (i == 1) { display.print("Long Words:  "); display.print(longLabels[readerLongMode]); }
+      if (i == 2) { display.print("Font Size:   "); display.print(fontLabels[readerFontMode]); }
+    }
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 56);
+    display.print("[Click] Tgl [Hold] Back");
+    return;
+  }
+
 
   if (currentReaderState == READER_BOOK_SELECT || currentReaderState == READER_CHAPTER_SELECT) {
     if (totalBooks == 0) {
@@ -249,7 +318,7 @@ void drawReaderApp() {
         // Marquee for the selected center item
         if (offset == 0 && nameWidth > 124) {
           int overflowChars = (nameWidth - 110) / 6 + 1;
-          int cycle = (millis() / 200) % (overflowChars + 6);
+          int cycle = ((millis() - readerMarqueeStartTime) / 200) % (overflowChars + 6);
           if (cycle < 2) {
             scrollX = 2;
           } else if (cycle < 2 + overflowChars) {
@@ -365,43 +434,30 @@ void drawReaderApp() {
       int pivotX = 45;
       int charWidth, currY;
 
-      if (len <= 10) {
-        // Tier 1: Default Size 2 (12px wide, 16px tall) — big & bold
+      if (readerFontMode == 1 || (readerFontMode == 0 && len <= 10)) {
         charWidth = 12;
         currY = 24;
         int currStartX = (pivotX - 6) - (orp * charWidth);
         if (currStartX < 0) currStartX = 0;
         if (currStartX + (len * charWidth) > 128) currStartX = 128 - (len * charWidth);
-
-        display.setFont(NULL);
-        display.setTextSize(2);
-        display.setCursor(currStartX, currY);
-        display.print(currWord);
-      } else if (len <= 16) {
-        // Tier 2: CustomReaderFont (8px wide, ~11px tall) — clean medium
+        display.setFont(NULL); display.setTextSize(2);
+        display.setCursor(currStartX, currY); display.print(currWord);
+      } else if (readerFontMode == 2 || (readerFontMode == 0 && len <= 16)) {
         charWidth = 8;
         currY = 34;
         int currStartX = (pivotX - 4) - (orp * charWidth);
         if (currStartX < 0) currStartX = 0;
         if (currStartX + (len * charWidth) > 128) currStartX = 128 - (len * charWidth);
-
-        display.setFont(&CustomReaderFont);
-        display.setTextSize(1);
-        display.setCursor(currStartX, currY);
-        display.print(currWord);
-        display.setFont(NULL);
+        display.setFont(&CustomReaderFont); display.setTextSize(1);
+        display.setCursor(currStartX, currY); display.print(currWord); display.setFont(NULL);
       } else {
-        // Tier 3: Default Size 1 (6px wide, 8px tall) — compact fallback
         charWidth = 6;
         currY = 28;
         int currStartX = (pivotX - 3) - (orp * charWidth);
         if (currStartX < 0) currStartX = 0;
         if (currStartX + (len * charWidth) > 128) currStartX = 128 - (len * charWidth);
-
-        display.setFont(NULL);
-        display.setTextSize(1);
-        display.setCursor(currStartX, currY);
-        display.print(currWord);
+        display.setFont(NULL); display.setTextSize(1);
+        display.setCursor(currStartX, currY); display.print(currWord);
       }
 
       display.setFont(NULL);
@@ -425,6 +481,56 @@ void drawReaderApp() {
 
 void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
 
+
+  if (currentReaderState == READER_HOME) {
+    if (encoderDelta != 0) {
+      readerHomeOption += encoderDelta;
+      if (readerHomeOption < 0) readerHomeOption = 1;
+      if (readerHomeOption > 1) readerHomeOption = 0;
+    }
+    if (btnEvent == BUTTON_CLICK) {
+      if (readerHomeOption == 0) {
+        currentReaderState = READER_BOOK_SELECT;
+        readerMarqueeStartTime = millis();
+      } else {
+        readerSetMenuIdx = 0;
+        currentReaderState = READER_SETTINGS;
+      }
+      playSelectTone();
+    }
+    if (btnEvent == BUTTON_LONG_PRESS) {
+      currentOSState = OS_APP_MENU;
+      playCancelTone();
+    }
+    return;
+  }
+  
+  if (currentReaderState == READER_SETTINGS) {
+    if (encoderDelta != 0) {
+      readerSetMenuIdx += encoderDelta;
+      if (readerSetMenuIdx < 0) readerSetMenuIdx = 2;
+      if (readerSetMenuIdx > 2) readerSetMenuIdx = 0;
+    }
+    if (btnEvent == BUTTON_CLICK) {
+      if (readerSetMenuIdx == 0) {
+        readerPuncMode = (readerPuncMode + 1) % 3;
+        preferences.putInt("rPunc", readerPuncMode);
+      } else if (readerSetMenuIdx == 1) {
+        readerLongMode = (readerLongMode + 1) % 3;
+        preferences.putInt("rLong", readerLongMode);
+      } else if (readerSetMenuIdx == 2) {
+        readerFontMode = (readerFontMode + 1) % 4;
+        preferences.putInt("rFont", readerFontMode);
+      }
+      playSelectTone();
+    }
+    if (btnEvent == BUTTON_LONG_PRESS) {
+      currentReaderState = READER_HOME;
+      playCancelTone();
+    }
+    return;
+  }
+
   if (currentReaderState == READER_BOOK_SELECT || currentReaderState == READER_CHAPTER_SELECT) {
     if (totalBooks > 0 && encoderDelta != 0) {
       selectedBookIdx += encoderDelta;
@@ -432,6 +538,7 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
       if (selectedBookIdx >= totalBooks) selectedBookIdx = 0;
       extern int menuScrollAnimY;
       menuScrollAnimY = encoderDelta * 15;
+      readerMarqueeStartTime = millis(); // Reset marquee
     }
     if (btnEvent == BUTTON_CLICK) {
       if (totalBooks > 0) {
