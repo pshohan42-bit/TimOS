@@ -1,8 +1,4 @@
-void drawAlarmApp();
-void drawSettingsApp();
-
-
-
+// TimOS Alarm App
 
 void handleAlarmApp(int encoderDelta, ButtonEvent btnEvent) {
   if (alarmActive) {

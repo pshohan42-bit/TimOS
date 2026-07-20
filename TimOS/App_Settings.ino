@@ -22,6 +22,8 @@ void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent) {
         settingsMenuSelect += encoderDelta;
         if (settingsMenuSelect < 0) settingsMenuSelect = 4;
         if (settingsMenuSelect > 4) settingsMenuSelect = 0;
+        extern int menuScrollAnimY;
+        menuScrollAnimY = encoderDelta * 14;
       }
       if (btnEvent == BUTTON_CLICK) {
         playSelectTone();

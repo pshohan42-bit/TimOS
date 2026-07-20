@@ -1,75 +1,4 @@
-void drawTetrisApp();
-void handleAlarmApp(int encoderDelta, ButtonEvent btnEvent);
-void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent);
-void handleTetrisApp(int encoderDelta, ButtonEvent btnEvent);
-void handleReaderApp(int encoderDelta, ButtonEvent btnEvent);
-bool checkTetrisCollision(int pType, int pRot, int pX, int pY);
-void lockTetrisPiece();
-void spawnTetrisPiece();
-
-void setup() {
-  Serial.begin(115200);
-
-  preferences.begin("timos", false);
-  systemVolume = preferences.getInt("vol", 2);
-  systemBrightness = preferences.getInt("bright", 2);
-  use12HourFormat = preferences.getBool("12hr", false);
-  alarmEnabled = preferences.getBool("alarmEn", false);
-  alarmHour = preferences.getInt("alarmHr", 6);
-  alarmMinute = preferences.getInt("alarmMin", 0);
-
-  // Initialize RTC time (dummy time for testing Launcher)
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  if (tv.tv_sec < 100000) {
-    tv.tv_sec = 1718000000; // Arbitrary timestamp
-    settimeofday(&tv, NULL);
-  }
-
-  // Configure Pins
-  pinMode(ENCODER_CLK, INPUT_PULLUP);
-  pinMode(ENCODER_DT, INPUT_PULLUP);
-  pinMode(ENCODER_SW, INPUT_PULLUP);
-  pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(LED_PIN, OUTPUT);
-  
-  digitalWrite(LED_PIN, HIGH);
-  lastClkState = digitalRead(ENCODER_CLK);
-
-  // Initialize OLED
-  Wire.begin(5, 6); // SDA = GPIO5, SCL = GPIO6
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    while(true) delay(100);
-  }
-  
-  display.ssd1306_command(0xA0); // Un-mirror
-  setDisplayBrightness(systemBrightness); // Apply initial brightness level
-  display.setTextColor(SSD1306_WHITE);
-  
-  updateBatteryMeasurements();
-  lastActivityTime = millis();
-
-  // Initialize Reader Text
-  String fullText = String(sampleReaderText);
-  int startIdx = 0;
-  int endIdx = fullText.indexOf(' ');
-  while (endIdx != -1 && readerTotalWords < MAX_READER_WORDS) {
-    readerWords[readerTotalWords++] = fullText.substring(startIdx, endIdx);
-    startIdx = endIdx + 1;
-    endIdx = fullText.indexOf(' ', startIdx);
-  }
-  if (startIdx < fullText.length() && readerTotalWords < MAX_READER_WORDS) {
-    readerWords[readerTotalWords++] = fullText.substring(startIdx);
-  }
-
-  // Show Boot Splash Screen
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(34, 24);
-  display.print("TimOS");
-  display.display();
-  delay(1000);
-}
+// TimOS Tetris App
 
 void handleTetrisApp(int encoderDelta, ButtonEvent btnEvent) {
   if (currentTetrisState == TETRIS_MENU) {
@@ -180,4 +109,3 @@ void spawnTetrisPiece() {
     playCancelTone();
   }
 }
-

@@ -1,4 +1,4 @@
-void drawPomodoroApp();
+// TimOS Pomodoro Display & Launcher
 
 
 /* ========================================================================== */

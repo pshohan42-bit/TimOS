@@ -62,6 +62,8 @@ int customSeconds = 0;
 int pomoTotalSeconds = 0;
 int pomoLeftSeconds = 0;
 int pomoFinishedSelect = 0; // 0 = Restart, 1 = Exit
+time_t pomoStartEpoch = 0;
+int pomoStartLeft = 0;
 
 // Alarm Variables
 bool alarmEnabled = false;
@@ -130,7 +132,6 @@ const uint16_t tetrominoes[7][4] = {
 };
 
 // Reader Variables
-const char* sampleReaderText = "TimOS is a powerful smart timer operating system built for the ESP32C3-Pro. It features a complete RSVP speed reading engine. This allows you to read text rapidly without moving your eyes! The current focus word is highlighted, while the previous and next context words are faded gracefully. Try adjusting the WPM speed using the rotary dial on the fly. Happy reading!";
 enum ReaderState { READER_BOOK_SELECT, READER_CHAPTER_SELECT, READER_MENU, READER_PLAYING, READER_PAUSED, READER_FINISHED };
 ReaderState currentReaderState = READER_BOOK_SELECT;
 int readerWpm = 250;
@@ -138,12 +139,11 @@ int readerWordIndex = 0;
 int readerTotalWords = 0;
 unsigned long lastReaderWordTime = 0;
 int sessionWordsRead = 0;
-#define MAX_READER_WORDS 100
-String readerWords[MAX_READER_WORDS];
 
 // Battery
 float globalBatVolts = 0.0;
 int globalBatteryPct = 100;
+int prevBatteryPct = -1;
 unsigned long lastBatteryCheckTime = 0;
 
 // Encoder & Button
@@ -179,6 +179,58 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent);
 bool checkTetrisCollision(int pType, int pRot, int pX, int pY);
 void lockTetrisPiece();
 void spawnTetrisPiece();
+
+void setup() {
+  Serial.begin(115200);
+
+  preferences.begin("timos", false);
+  systemVolume = preferences.getInt("vol", 2);
+  systemBrightness = preferences.getInt("bright", 2);
+  use12HourFormat = preferences.getBool("12hr", false);
+  alarmEnabled = preferences.getBool("alarmEn", false);
+  alarmHour = preferences.getInt("alarmHr", 6);
+  alarmMinute = preferences.getInt("alarmMin", 0);
+  readerWpm = preferences.getInt("wpm", 250); // Restore WPM (#22)
+
+  // Initialize RTC time (dummy time for testing Launcher)
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  if (tv.tv_sec < 100000) {
+    tv.tv_sec = 1718000000; // Arbitrary timestamp
+    settimeofday(&tv, NULL);
+  }
+
+  // Configure Pins
+  pinMode(ENCODER_CLK, INPUT_PULLUP);
+  pinMode(ENCODER_DT, INPUT_PULLUP);
+  pinMode(ENCODER_SW, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  
+  digitalWrite(LED_PIN, HIGH);
+  lastClkState = digitalRead(ENCODER_CLK);
+
+  // Initialize OLED
+  Wire.begin(5, 6); // SDA = GPIO5, SCL = GPIO6
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    while(true) delay(100);
+  }
+  
+  display.ssd1306_command(0xA0); // Un-mirror
+  setDisplayBrightness(systemBrightness);
+  display.setTextColor(SSD1306_WHITE);
+  
+  updateBatteryMeasurements();
+  lastActivityTime = millis();
+
+  // Show Boot Splash Screen
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(34, 24);
+  display.print("TimOS");
+  display.display();
+  delay(1000);
+}
 
 
 void drawAppMenu() {
@@ -486,8 +538,7 @@ void drawAlarmApp() {
     display.setTextColor(SSD1306_INVERSE);
 
     for (int offset = -1; offset <= 1; offset++) {
-      int optIdx = alarmMenuSelect + offset;
-      if (optIdx < 0 || optIdx >= 2) continue; // Only 2 items, don't wrap
+      int optIdx = (alarmMenuSelect + offset + 2) % 2;
       
       int drawY = midY + (offset * spacing) + menuScrollAnimY;
       
@@ -559,11 +610,14 @@ void drawAlarmApp() {
 /* ========================================================================== */
 
 int readEncoderDelta() {
+  static unsigned long lastEncoderTime = 0;
   int currentClkState = digitalRead(ENCODER_CLK);
   int delta = 0;
   if (currentClkState != lastClkState) {
     lastClkState = currentClkState;
     if (currentClkState == LOW) {
+      if (millis() - lastEncoderTime < 3) return 0; // Debounce
+      lastEncoderTime = millis();
       if (digitalRead(ENCODER_DT) == HIGH) delta = -1;
       else delta = 1;
       playTick();
@@ -663,6 +717,7 @@ void goToSleep() {
     esp_sleep_enable_timer_wakeup((uint64_t)diffSeconds * 1000000ULL);
   }
 
+  preferences.end();
   esp_deep_sleep_start();
 }
 
@@ -674,15 +729,11 @@ void playTick() {
 
 void playSelectTone() {
   if (systemVolume == 0) return;
-  tone(BUZZER_PIN, (systemVolume == 1) ? 1200 : 1800, 50);
-  delay(60);
   tone(BUZZER_PIN, (systemVolume == 1) ? 1600 : 2200, 80);
 }
 
 void playCancelTone() {
   if (systemVolume == 0) return;
-  tone(BUZZER_PIN, (systemVolume == 1) ? 800 : 1200, 100);
-  delay(120);
   tone(BUZZER_PIN, (systemVolume == 1) ? 500 : 800, 150);
 }
 
@@ -1055,27 +1106,37 @@ void loop() {
     uiChanged = true;
   }
 
-  // 3. Battery Tick (non-blocking)
+  // 3. Battery Tick (non-blocking, only redraw if changed)
   if (now - lastBatteryCheckTime >= 2000) {
     lastBatteryCheckTime = now;
     updateBatteryMeasurements();
-    uiChanged = true;
+    if (globalBatteryPct != prevBatteryPct) {
+      prevBatteryPct = globalBatteryPct;
+      uiChanged = true;
+    }
   }
 
-  // 3.5. Pomodoro Timer Countdown Tick (1Hz)
+  // 3.5. Pomodoro Timer Countdown Tick (RTC-based to avoid drift)
   if (currentOSState == OS_APP_POMODORO && currentPomoState == POMO_STATE_RUNNING) {
-    static unsigned long lastPomoTick = 0;
-    if (now - lastPomoTick >= 1000) {
-      lastPomoTick = now;
-      if (pomoLeftSeconds > 0) {
-        pomoLeftSeconds--;
-        uiChanged = true;
-      }
-      if (pomoLeftSeconds <= 0) {
-        currentPomoState = POMO_STATE_FINISHED;
-        uiChanged = true;
-        playFinishedMelody();
-      }
+    // Track start reference
+    if (pomoStartEpoch == 0) {
+      struct timeval ptv; gettimeofday(&ptv, NULL);
+      pomoStartEpoch = ptv.tv_sec;
+      pomoStartLeft = pomoLeftSeconds;
+    }
+    struct timeval ptv; gettimeofday(&ptv, NULL);
+    int elapsed = (int)(ptv.tv_sec - pomoStartEpoch);
+    int newLeft = pomoStartLeft - elapsed;
+    if (newLeft < 0) newLeft = 0;
+    if (newLeft != pomoLeftSeconds) {
+      pomoLeftSeconds = newLeft;
+      uiChanged = true;
+    }
+    if (pomoLeftSeconds <= 0) {
+      pomoStartEpoch = 0; // Reset for next session
+      currentPomoState = POMO_STATE_FINISHED;
+      uiChanged = true;
+      playFinishedMelody();
     }
   }
 
@@ -1183,6 +1244,7 @@ void loop() {
   } else if (btnEvent == BUTTON_HOME_PRESS) {
     if (currentOSState == OS_APP_TETRIS) display.setRotation(0);
     currentOSState = OS_LAUNCHER;
+    menuScrollAnimY = 0; // Reset animation on state transition (#17)
     playCancelTone();
   }
 
@@ -1207,6 +1269,7 @@ void loop() {
       }
       if (btnEvent == BUTTON_CLICK) {
         // Open Selected App
+        menuScrollAnimY = 0; // Reset animation on state transition (#17)
         if (selectedAppIndex == 0) currentOSState = OS_APP_POMODORO;
         else if (selectedAppIndex == 1) currentOSState = OS_APP_ALARM;
         else if (selectedAppIndex == 2) currentOSState = OS_APP_SETTINGS;
@@ -1214,7 +1277,10 @@ void loop() {
           currentOSState = OS_APP_TETRIS;
           display.setRotation(3); // Inverted Portrait mode
         }
-        else if (selectedAppIndex == 4) currentOSState = OS_APP_READER;
+        else if (selectedAppIndex == 4) {
+          currentOSState = OS_APP_READER;
+          initSPIFFS(); // Initialize SPIFFS once on entry (#15)
+        }
         playSelectTone();
       }
       if (btnEvent == BUTTON_LONG_PRESS) {
@@ -1292,10 +1358,12 @@ void loop() {
       }
       else if (currentPomoState == POMO_STATE_RUNNING) {
         if (btnEvent == BUTTON_CLICK) {
+          pomoStartEpoch = 0; // Reset RTC reference so it re-initializes on resume
           currentPomoState = POMO_STATE_PAUSED;
           playSelectTone();
         }
         if (btnEvent == BUTTON_LONG_PRESS) {
+          pomoStartEpoch = 0; // Reset RTC reference
           currentPomoState = POMO_STATE_MENU;
           playCancelTone();
         }
@@ -1351,7 +1419,7 @@ void loop() {
   // 7. Draw UI Layer
   if (uiChanged) {
     display.clearDisplay();
-    drawBatteryStatus();
+    if (currentOSState != OS_APP_TETRIS) drawBatteryStatus(); // Skip in Tetris rotated mode (#8)
     
     if (currentOSState == OS_LAUNCHER) {
       drawLauncher();

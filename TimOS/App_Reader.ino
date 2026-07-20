@@ -214,7 +214,6 @@ void loadReaderProgress() {
 }
 
 void drawReaderApp() {
-  initSPIFFS();
 
   if (currentReaderState == READER_BOOK_SELECT || currentReaderState == READER_CHAPTER_SELECT) {
     if (totalBooks == 0) {
@@ -411,9 +410,11 @@ void drawReaderApp() {
 
     }
 
-    int progress = (readerTotalWords > 0) ? (readerWordIndex * 128) / readerTotalWords : 0;
+    int progress = (readerTotalWords > 0) ? (readerWordIndex * 124) / readerTotalWords : 0;
     display.drawRect(0, 56, 128, 8, SSD1306_WHITE);
-    display.fillRect(0, 56, progress, 8, SSD1306_WHITE);
+    if (progress > 0) {
+      display.fillRect(2, 58, progress, 4, SSD1306_WHITE);
+    }
 
   } else if (currentReaderState == READER_FINISHED) {
     display.setTextSize(2);
@@ -423,7 +424,6 @@ void drawReaderApp() {
 }
 
 void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
-  initSPIFFS();
 
   if (currentReaderState == READER_BOOK_SELECT || currentReaderState == READER_CHAPTER_SELECT) {
     if (totalBooks > 0 && encoderDelta != 0) {
@@ -443,7 +443,10 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
            display.display();
            bookList[selectedBookIdx].wordCount = countFileWordsAndBuildIndex(bookList[selectedBookIdx].path.c_str());
         } else {
-           // Rebuild index just in case
+           display.clearDisplay();
+           display.setCursor(10, 30);
+           display.print("Loading book...");
+           display.display();
            countFileWordsAndBuildIndex(bookList[selectedBookIdx].path.c_str());
         }
         readerTotalWords = bookList[selectedBookIdx].wordCount;
@@ -468,6 +471,7 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
         readerWpm += encoderDelta * 25;
         if (readerWpm < 50) readerWpm = 50;
         if (readerWpm > 1000) readerWpm = 1000;
+        preferences.putInt("wpm", readerWpm);
       } else {
         readerMenuOption += encoderDelta;
         if (readerMenuOption < 0) readerMenuOption = 2;
@@ -502,6 +506,7 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
       readerWpm += encoderDelta * 10;
       if (readerWpm < 50) readerWpm = 50;
       if (readerWpm > 1000) readerWpm = 1000;
+      preferences.putInt("wpm", readerWpm);
     }
     if (btnEvent == BUTTON_CLICK) {
       saveReaderProgress();
@@ -518,7 +523,6 @@ void handleReaderApp(int encoderDelta, ButtonEvent btnEvent) {
       readerWordIndex += encoderDelta;
       if (readerWordIndex < 0) readerWordIndex = 0;
       if (readerWordIndex >= readerTotalWords) readerWordIndex = readerTotalWords - 1;
-      saveReaderProgress();
     }
     if (btnEvent == BUTTON_CLICK) {
       currentReaderState = READER_PLAYING;
