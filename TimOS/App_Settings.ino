@@ -8,6 +8,8 @@ void drawSettingsApp() {
     case SET_STATE_DATE_YY:    drawSettingsDateSet(); break;
     case SET_STATE_VOLUME:     drawSettingsVolume(); break;
     case SET_STATE_BRIGHTNESS: drawSettingsBrightness(); break;
+    case SET_STATE_WIFI_LIST:  drawWiFiList(); break;
+    case SET_STATE_WIFI_PASS:  drawWiFiPass(); break;
   }
 }
 
@@ -20,8 +22,8 @@ void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent) {
     case SET_STATE_MENU:
       if (encoderDelta != 0) {
         settingsMenuSelect += encoderDelta;
-        if (settingsMenuSelect < 0) settingsMenuSelect = 4;
-        if (settingsMenuSelect > 4) settingsMenuSelect = 0;
+        if (settingsMenuSelect < 0) settingsMenuSelect = 5;
+        if (settingsMenuSelect > 5) settingsMenuSelect = 0;
         extern int menuScrollAnimY;
         menuScrollAnimY = encoderDelta * 14;
       }
@@ -43,6 +45,13 @@ void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent) {
           currentSettingsState = SET_STATE_VOLUME;
         } else if (settingsMenuSelect == 4) {
           currentSettingsState = SET_STATE_BRIGHTNESS;
+        } else if (settingsMenuSelect == 5) {
+          WiFi.mode(WIFI_STA);
+          WiFi.disconnect();
+          delay(100);
+          wifiScanCount = WiFi.scanNetworks();
+          wifiListSelect = 0;
+          currentSettingsState = SET_STATE_WIFI_LIST;
         }
       }
       if (btnEvent == BUTTON_LONG_PRESS) {
@@ -160,6 +169,11 @@ void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent) {
       }
       break;
 
+    case SET_STATE_WIFI_LIST:
+    case SET_STATE_WIFI_PASS:
+      handleWiFiStates(encoderDelta, btnEvent);
+      break;
+
     case SET_STATE_BRIGHTNESS:
       if (encoderDelta != 0) {
         systemBrightness += encoderDelta;
@@ -180,3 +194,121 @@ void handleSettingsApp(int encoderDelta, ButtonEvent btnEvent) {
   }
 }
 
+
+
+
+void drawWiFiList() {
+  display.setTextSize(1);
+  display.setCursor(4, 2);
+  display.print("SELECT WIFI");
+  display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
+
+  if (wifiScanCount == 0) {
+    display.setCursor(4, 24);
+    display.print("No networks found.");
+    return;
+  }
+  if (wifiScanCount < 0) {
+    display.setCursor(4, 24);
+    display.print("Scanning...");
+    return;
+  }
+
+  for (int i = 0; i < 3; i++) {
+    int idx = wifiListSelect - 1 + i;
+    int y = 20 + i * 14;
+    if (idx >= 0 && idx < wifiScanCount) {
+      if (idx == wifiListSelect) {
+        display.fillRect(0, y - 2, 128, 13, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+      display.setCursor(4, y);
+      String ssid = WiFi.SSID(idx);
+      if (ssid.length() > 20) ssid = ssid.substring(0, 18) + "..";
+      display.print(ssid);
+    }
+  }
+  display.setTextColor(SSD1306_WHITE);
+}
+
+void drawWiFiPass() {
+  display.setTextSize(1);
+  display.setCursor(4, 2);
+  display.print("WIFI PASSWORD");
+  display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
+
+  // Draw typed password
+  display.setCursor(4, 24);
+  String disp = currentInputText;
+  if (disp.length() > 20) disp = disp.substring(disp.length() - 20);
+  display.print(disp);
+
+  // Draw current char selector
+  extern char charSet[];
+  display.fillRect(4, 40, 12, 16, SSD1306_WHITE);
+  display.setTextColor(SSD1306_BLACK);
+  display.setCursor(6, 44);
+  display.print(charSet[currentCharIdx]);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(22, 44);
+  display.print("<- Scroll / Click");
+}
+
+void handleWiFiStates(int encoderDelta, ButtonEvent btnEvent) {
+  if (currentSettingsState == SET_STATE_WIFI_LIST) {
+    if (encoderDelta != 0 && wifiScanCount > 0) {
+      wifiListSelect += encoderDelta;
+      if (wifiListSelect < 0) wifiListSelect = wifiScanCount - 1;
+      if (wifiListSelect >= wifiScanCount) wifiListSelect = 0;
+    }
+    if (btnEvent == BUTTON_CLICK && wifiScanCount > 0) {
+      wifiSSID = WiFi.SSID(wifiListSelect);
+      if (wifiSSID == preferences.getString("wifiSSID", "")) {
+        currentInputText = preferences.getString("wifiPWD", "");
+      } else {
+        currentInputText = "";
+      }
+      currentCharIdx = 0;
+      currentSettingsState = SET_STATE_WIFI_PASS;
+      playSelectTone();
+    }
+    if (btnEvent == BUTTON_LONG_PRESS) {
+      currentSettingsState = SET_STATE_MENU;
+      playCancelTone();
+    }
+  } else if (currentSettingsState == SET_STATE_WIFI_PASS) {
+    extern char charSet[];
+    if (encoderDelta != 0) {
+      currentCharIdx += encoderDelta;
+      int len = strlen(charSet);
+      if (currentCharIdx < 0) currentCharIdx = len - 1;
+      if (currentCharIdx >= len) currentCharIdx = 0;
+    }
+    if (btnEvent == BUTTON_CLICK) {
+      if (charSet[currentCharIdx] == '<') {
+        if (currentInputText.length() > 0) {
+          currentInputText.remove(currentInputText.length() - 1);
+        }
+      } else if (currentInputText.length() < 60) {
+        currentInputText += charSet[currentCharIdx];
+      }
+      playSelectTone();
+    }
+    if (btnEvent == BUTTON_LONG_PRESS) {
+      wifiPassword = currentInputText;
+      preferences.putString("wifiSSID", wifiSSID);
+      preferences.putString("wifiPWD", wifiPassword);
+      
+      // Trigger background sync
+      WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+      wifiSyncState = 1;
+      wifiTaskTick = millis();
+      
+      currentSettingsState = SET_STATE_MENU;
+      playCancelTone();
+    }
+  }
+}

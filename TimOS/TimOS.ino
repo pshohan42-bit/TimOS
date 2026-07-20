@@ -6,6 +6,20 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "esp_sleep.h"
+
+#include <WiFi.h>
+
+String wifiSSID = "";
+String wifiPassword = "";
+int wifiSyncState = 0; // 0=idle, 1=connecting, 2=waiting for time, 3=success
+unsigned long wifiTaskTick = 0;
+String currentInputText = "";
+int textInputCursor = 0;
+int currentCharIdx = 0;
+int wifiListSelect = 0;
+int wifiScanCount = 0;
+char charSet[] = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_+=,.:;<";
+
 #include <sys/time.h>
 #include <Preferences.h>
 #include "CustomReaderFont.h"
@@ -91,7 +105,9 @@ enum SettingsState {
   SET_STATE_DATE_MM,
   SET_STATE_DATE_YY,
   SET_STATE_VOLUME,
-  SET_STATE_BRIGHTNESS
+  SET_STATE_BRIGHTNESS,
+  SET_STATE_WIFI_LIST,
+  SET_STATE_WIFI_PASS
 };
 SettingsState currentSettingsState = SET_STATE_MENU;
 int settingsMenuSelect = 0; // 0=Time, 1=Date, 2=Time Format, 3=Volume, 4=Brightness
@@ -235,6 +251,16 @@ void setup() {
   
   updateBatteryMeasurements();
   lastActivityTime = millis();
+
+  wifiSSID = preferences.getString("wifiSSID", "");
+  wifiPassword = preferences.getString("wifiPWD", "");
+  if (wifiSSID.length() > 0) {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+    wifiSyncState = 1;
+    wifiTaskTick = millis();
+  }
+
 
   // Show Boot Splash Screen
   display.clearDisplay();
@@ -697,7 +723,7 @@ void setDisplayBrightness(int level) {
 void drawSettingsMenu() {
   display.setTextSize(1); // Fix: Reset font size when returning from submenus!
   
-  const char* options[5] = {"Set Time", "Set Date", "Time Format", "Volume", "Brightness"};
+  const char* options[6] = {"Set Time", "Set Date", "Time Format", "Volume", "Brightness", "WiFi Time Sync"};
   int midY = 32;
   int spacing = 14;
   extern int menuScrollAnimY;
@@ -709,7 +735,7 @@ void drawSettingsMenu() {
   display.setTextColor(SSD1306_INVERSE);
 
   for (int offset = -2; offset <= 2; offset++) {
-    int optIdx = (settingsMenuSelect + offset + 5) % 5;
+    int optIdx = (settingsMenuSelect + offset + 6) % 6;
     int drawY = midY + (offset * spacing) + menuScrollAnimY;
     
     display.setCursor(10, drawY - 2);
@@ -1045,6 +1071,37 @@ void loop() {
   }
 
   // 3. Battery Tick (non-blocking, only redraw if changed)
+
+  // WiFi Background Task
+  if (wifiSyncState == 1 && (millis() - wifiTaskTick > 1000)) {
+    wifiTaskTick = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+      configTime(6 * 3600, 0, "pool.ntp.org", "time.nist.gov"); // Set Dhaka offset natively
+      wifiSyncState = 2;
+    } else if (millis() - wifiTaskTick > 30000) {
+      WiFi.disconnect(true, true);
+      WiFi.mode(WIFI_OFF);
+      wifiSyncState = 0;
+    }
+  } else if (wifiSyncState == 2 && (millis() - wifiTaskTick > 1000)) {
+    wifiTaskTick = millis();
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 0)) {
+      WiFi.disconnect(true, true);
+      WiFi.mode(WIFI_OFF);
+      wifiSyncState = 3;
+    } else if (millis() - wifiTaskTick > 60000) {
+      WiFi.disconnect(true, true);
+      WiFi.mode(WIFI_OFF);
+      wifiSyncState = 0;
+    }
+  } else if (wifiSyncState == 3 && (millis() - wifiTaskTick > 43200000UL)) { // 12 hours
+    wifiTaskTick = millis();
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+    wifiSyncState = 1;
+  }
+
   if (now - lastBatteryCheckTime >= 2000) {
     lastBatteryCheckTime = now;
     updateBatteryMeasurements();
